@@ -15,6 +15,8 @@ from fairscale.nn.model_parallel.layers import (
 )
 from torch import nn
 
+# Added kernels for optimization
+import minimal_attn
 
 @dataclass
 class ModelArgs:
@@ -295,11 +297,19 @@ class Attention(nn.Module):
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
         values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+# NOTE: Original:
+#        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+#        if mask is not None:
+#            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+#        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+#        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+# NOTE: Replaced with following
         if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+            output = minimal_attn.forward(xq, keys, values, mask)
+        else:
+            empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
+            output = minimal_attn.forward(xq, keys, values, empty_mask)
+
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
 
@@ -482,7 +492,7 @@ class Transformer(nn.Module):
             # When performing key-value caching, we compute the attention scores
             # only for the new sequence. Thus, the matrix of scores is of size
             # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
-            # j > cache_len + i, since row i corresponds to token cache_len + i.
+            # j > cache_len + i, since row i c, float* maskorresponds to token cache_len + i.
             mask = torch.hstack([
                 torch.zeros((seqlen, start_pos), device=tokens.device),
                 mask
