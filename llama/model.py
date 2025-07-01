@@ -252,7 +252,10 @@ class Attention(nn.Module):
                 self.head_dim,
             )
         ).cuda()
-        self.use_cuda_kernel = os.getenv('USE_CUDA_KERNEL', 'true').lower() == 'true'
+        self.use_flash_attention_minimal = os.getenv('USE_FLASH_MINIMAL', 'true').lower() == 'true'
+        self.use_flash_v1 = os.getenv('USE_FLASH_V1', 'true').lower() == 'true'
+        self.start_event = torch.cuda.Event(enable_timing=True)
+        self.end_event = torch.cuda.Event(enable_timing=True)
 
     def forward(
         self,
@@ -300,20 +303,39 @@ class Attention(nn.Module):
         keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
         values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
 
-# NOTE: Original:
-        if not self.use_cuda_kernel:
-            scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if mask is not None:
-                scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
-# NOTE: flash_attention_minimal
-        else:
+        # 开始计时
+        self.start_event.record()
+# NOTE: impl from flash-attention-minimal
+        if self.use_flash_attention_minimal:
             if mask is not None:
                 output = minimal_attn.forward(xq, keys, values, mask)
             else:
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
                 output = minimal_attn.forward(xq, keys, values, empty_mask)
+            method_name = "flash-attention-minimal"
+# NOTE: impl based on minimal. flash attention v1
+        elif self.use_flash_attn_v1:
+            if mask is not None:
+                output = minimal_attn.forward(xq, keys, values, mask)
+            else:
+                empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
+                output = minimal_attn.forward(xq, keys, values, empty_mask)
+            method_name = "flash-attn-v1"
+# NOTE: Original impl
+        else:
+            scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if mask is not None:
+                scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+            method_name = "Original"
+
+        # 结束计时
+        self.end_event.record()
+        torch.cuda.synchronize()
+        
+        duration_ms = self.start_event.elapsed_time(self.end_event)
+        print(f"[{method_name}] Attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)

@@ -8,7 +8,10 @@ setup(
         CUDAExtension(
             name='minimal_attn',
             sources=['kernels/bind.cpp', 'kernels/flash_minimal.cu'],
-            extra_cuda_cflags=['-O2', '--arch=sm_80', '-DDEBUG']
+            extra_compile_args={
+                'cxx': ['-O2'],
+                'nvcc': ['-O2', '-arch=sm_80', '-DDEBUG']
+            }
         ),
     ],
     cmdclass={
