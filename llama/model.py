@@ -297,18 +297,22 @@ class Attention(nn.Module):
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
         values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
+
 # NOTE: Original:
-#        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-#        if mask is not None:
-#            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-#        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-#        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+#       scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
+#       if mask is not None:
+#           scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+#       scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+#       output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
 # NOTE: Replaced with following
         if mask is not None:
             output = minimal_attn.forward(xq, keys, values, mask)
         else:
             empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
             output = minimal_attn.forward(xq, keys, values, empty_mask)
+
+        print("seq_len: ", xq.size(2), "seq_len + cache_len:", keys.size(2))
+        print(f"output stats: min={output.min()}, max={output.max()}, has_nan={torch.isnan(output).any()}, has_inf={torch.isinf(output).any()}")
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)

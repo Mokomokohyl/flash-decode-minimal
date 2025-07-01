@@ -18,102 +18,117 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
 
     // Define SRAM for Q,K,V,S
     extern __shared__ float sram[];
-    int tile_size = Bc * d;  // size of Qi, Kj, Vj
     float* Qi = sram;
-    float* Kj = &sram[tile_size];
-    float* Vj = &sram[tile_size * 2];
-    float* S = &sram[tile_size * 3];
+    float* Kj = &sram[Br * d];
+    float* Vj = &sram[Br * d + Bc * d];
+    float* S = &sram[Br * d + 2 * Bc * d];
 
     for (int j = 0; j < Tc; j++) {
 
         // Load Kj, Vj to SRAM
+        // Each thread loads a row of K, V ([N, d])
+        int k_idx = Bc * j + tx;
         for (int x = 0; x < d; x++) {
             if (Bc * j + tx < NKV) {
-                Kj[(tx * d) + x] = static_cast<float>(K[kv_offset + (tile_size * j) + (tx * d) + x]);
-                Vj[(tx * d) + x] = static_cast<float>(V[kv_offset + (tile_size * j) + (tx * d) + x]);
+                Kj[(tx * d) + x] = static_cast<float>(K[kv_offset + k_idx * d + x]);
+                Vj[(tx * d) + x] = static_cast<float>(V[kv_offset + k_idx * d + x]);
+            } else {
+                Kj[(tx * d) + x] = 0.0f;
+                Vj[(tx * d) + x] = 0.0f;
             }
         }
         __syncthreads();  // such that the inner loop can use the correct Kj, Vj
 
         for (int i = 0; i < Tr; i++)  {
+            // Each thread assigned a row of Q. Br <= Bc, there might be more threads than Br.
             int q_idx = i * Br + tx;
-            if (q_idx >= NQ) continue;
-
-            // Load Qi to SRAM, l and m to registers
-            for (int x = 0; x < d; x++) {
-                Qi[(tx * d) + x] = static_cast<float>(Q[q_offset + q_idx * d + x]);
-            }
-            float row_m_prev = m[lm_offset + q_idx];
-            float row_l_prev = l[lm_offset + q_idx];
-
-            // S = QK^T, row_m = rowmax(S)
-            float row_m = -INFINITY;
-            for (int y = 0; y < Bc; y++) {
-                int k_idx = j * Bc + y;
-                float sum = -INFINITY; 
-                
-                if (k_idx < NKV) {
-                    sum = 0;
-                    for (int x = 0; x < d; x++) {
-                        sum += Qi[(tx * d) + x] * Kj[(y * d) + x];
-                    }
-                    sum *= softmax_scale;
-                    
-                    if (mask != nullptr) {
-                        int mask_idx = q_idx * NKV + k_idx;
-                        sum += static_cast<float>(mask[mask_idx]);
-                    }
+            if (tx < Br && q_idx < NQ) {
+                // Load Qi to SRAM, l and m to registers
+                for (int x = 0; x < d; x++) {
+                    Qi[(tx * d) + x] = static_cast<float>(Q[q_offset + q_idx * d + x]);
                 }
-                S[(Bc * tx) + y] = sum;
-                row_m = max(row_m, sum);
-            }
 
+                float row_m_prev = m[lm_offset + q_idx];
+                float row_l_prev = l[lm_offset + q_idx];
 
-            // P = exp(S - row_m), row_l = rowsum(P)
-            float row_l = 0;
-            for (int y = 0; y < Bc; y++) {
-                if (S[(Bc * tx) + y] == -INFINITY) {
-                    S[(Bc * tx) + y] = 0.0f;
-                }
-                else {
-                    S[(Bc * tx) + y] = __expf(S[(Bc * tx) + y] - row_m);
-                }
-                row_l += S[(Bc * tx) + y];
-            }
-
-            // Compute new m and l
-            float row_m_new = max(row_m_prev, row_m);
-            float row_l_new = (__expf(row_m_prev - row_m_new) * row_l_prev) + (__expf(row_m - row_m_new) * row_l);
-
-            // Write O, l, m to HBM
-            for (int x = 0; x < d; x++) {
-                float pv = 0;  // Pij * Vj
+                // S = QK^T, row_m = rowmax(S)
+                float row_m = -INFINITY;
                 for (int y = 0; y < Bc; y++) {
-                    pv += S[(Bc * tx) + y] * Vj[(y * d) + x];
+
+                    float sum = -INFINITY; 
+                    if ((j * Bc + y) < NKV) {
+                        sum = 0;
+                        for (int x = 0; x < d; x++) {
+                            sum += Qi[(tx * d) + x] * Kj[(y * d) + x];
+                        }
+                        sum *= softmax_scale;
+                        
+                        if (mask != nullptr) {
+                            int mask_idx = q_idx * NKV + (j * Bc + y);
+                            sum += static_cast<float>(mask[mask_idx]);
+                        }
+                    }
+                    S[(Bc * tx) + y] = sum;
+                    row_m = fmaxf(row_m, sum);
                 }
-                float o_val = (1 / row_l_new) \
-                    * ((row_l_prev * __expf(row_m_prev - row_m_new) * static_cast<float>(O[q_offset + (tile_size * i) + (tx * d) + x])) \
-                    + (__expf(row_m - row_m_new) * pv));
-                // Convert float back to half for output
-                O[q_offset + (tile_size * i) + (tx * d) + x] = static_cast<c10::Half>(o_val);
+
+
+                // P = exp(S - row_m), row_l = rowsum(P)
+                float row_l = 0;
+                for (int y = 0; y < Bc; y++) {
+                    if ((j * Bc + y) < NKV) {
+                        S[(Bc * tx) + y] = __expf(S[(Bc * tx) + y] - row_m);
+                        row_l += S[(Bc * tx) + y];
+                    } else {
+                        S[(Bc * tx) + y] = 0.0f;
+                    }
+                }
+
+                // Compute new m and l
+                float row_m_new = max(row_m_prev, row_m);
+                float row_l_new = (__expf(row_m_prev - row_m_new) * row_l_prev) + (__expf(row_m - row_m_new) * row_l);
+
+                // Write O, l, m to HBM
+                for (int x = 0; x < d; x++) {
+                    float pv = 0;  // Pij * Vj
+                    for (int y = 0; y < Bc; y++) {
+                        if ((j * Bc + y < NKV)) {
+                            pv += S[(Bc * tx) + y] * Vj[(y * d) + x];
+                        }
+                    }
+                    float o_val = (1 / row_l_new) \
+                        * ((row_l_prev * __expf(row_m_prev - row_m_new) * static_cast<float>(O[q_offset + q_idx * d + x])) \
+                        + (__expf(row_m - row_m_new) * pv));
+
+                    // Convert float back to half for output
+                    O[q_offset + q_idx * d + x] = static_cast<c10::Half>(o_val);
+                }
+                m[lm_offset + q_idx] = row_m_new;
+                l[lm_offset + q_idx] = row_l_new;
             }
-            m[lm_offset + (Br * i) + tx] = row_m_new;
-            l[lm_offset + (Br * i) + tx] = row_l_new;
         }
         __syncthreads();  // otherwise, thread can use the wrong Kj, Vj in inner loop
     }
 }
 
 torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor mask) {
-    // TODO: determine Bc, Br dynamically
-    const int Bc = 16; const int Br = 16;
-
     const int B = Q.size(0); const int nh = Q.size(1);
     const int NQ = Q.size(2); const int d = Q.size(3);
     const int NKV = K.size(2);
 
-    const int Tc = ceil((float) NKV / Bc); const int Tr = ceil((float) NQ / Br);
+    printf("B: %d, nh: %d, NQ: %d, d: %d, NKV: %d", B, nh, NQ, d, NKV);
+
+    int max_sram_size;
+    cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
+    printf("Max sram size: %d\n", max_sram_size);
+    float M = (float)max_sram_size / sizeof(float);
+
+    const int Bc = ceil(M / (4 * d)); const int Br = min(Bc, d);
+    const int Tr = ceil((float) NQ / Br);
+    const int Tc = ceil((float) NKV / Bc);
     const float softmax_scale = 1.0 / sqrt(d);
+
+    printf("Bc: %d, Br: %d, NQ: %d, NKV: %d, Tr: %d, Tc: %d\n", Bc, Br, NQ, NKV, Tr, Tc);
 
     // Initialize O, l, m to HBM
     auto O = torch::zeros_like(Q);
@@ -121,14 +136,18 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     auto m = torch::full({B, nh, NQ}, -INFINITY, torch::dtype(torch::kFloat32).device(Q.device()));
 
     // Calculate SRAM size needed per block
-    const int sram_size = (3 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
-    int max_sram_size;
-    cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
+    const int sram_size = (Br * d * sizeof(float)) + (2 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
+    printf("Required Sram size: %d\n", sram_size);
 
     dim3 grid_dim(B, nh);  // batch_size x num_heads
     dim3 block_dim(Bc);  // Bc threads per block
 
     const bool has_mask = mask.numel() > 0;
+    if (has_mask) {
+        printf("with mask\n");
+    } else {
+        printf("no mask\n");
+    }
     c10::Half* mask_ptr = has_mask ? mask.data_ptr<c10::Half>() : nullptr;
 
     forward_kernel<<<grid_dim, block_dim, sram_size>>>(
