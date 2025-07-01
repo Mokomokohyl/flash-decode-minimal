@@ -4,9 +4,9 @@
 #include <cuda_fp16.h>
 
 __global__
-void forward_kernel(const float* Q, const float* K, const float* V, const int NQ, const int NKV, const int d,
+void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
                     const int Tc, const int Tr, const int Bc, const int Br, const float softmax_scale,
-                    float* l, float *m, float* O, const float* mask) {
+                    float* l, float *m, c10::Half* O, const c10::Half* mask) {
     int tx = threadIdx.x;
     int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
 
@@ -30,8 +30,8 @@ void forward_kernel(const float* Q, const float* K, const float* V, const int NQ
         int k_idx = Bc * j + tx;
         for (int x = 0; x < d; x++) {
             if (Bc * j + tx < NKV) {
-                Kj[(tx * d) + x] = K[kv_offset + k_idx * d + x];
-                Vj[(tx * d) + x] = V[kv_offset + k_idx * d + x];
+                Kj[(tx * d) + x] = static_cast<float>(K[kv_offset + k_idx * d + x]);
+                Vj[(tx * d) + x] = static_cast<float>(V[kv_offset + k_idx * d + x]);
             } else {
                 Kj[(tx * d) + x] = 0.0f;
                 Vj[(tx * d) + x] = 0.0f;
@@ -45,7 +45,7 @@ void forward_kernel(const float* Q, const float* K, const float* V, const int NQ
             if (tx < Br && q_idx < NQ) {
                 // Load Qi to SRAM, l and m to registers
                 for (int x = 0; x < d; x++) {
-                    Qi[(tx * d) + x] = Q[q_offset + q_idx * d + x];
+                    Qi[(tx * d) + x] = static_cast<float>(Q[q_offset + q_idx * d + x]);
                 }
 
                 float row_m_prev = m[lm_offset + q_idx];
@@ -65,7 +65,7 @@ void forward_kernel(const float* Q, const float* K, const float* V, const int NQ
                         
                         if (mask != nullptr) {
                             int mask_idx = q_idx * NKV + (j * Bc + y);
-                            sum += mask[mask_idx];
+                            sum += static_cast<float>(mask[mask_idx]);
                         }
                     }
                     S[(Bc * tx) + y] = sum;
@@ -97,11 +97,11 @@ void forward_kernel(const float* Q, const float* K, const float* V, const int NQ
                         }
                     }
                     float o_val = (1 / row_l_new) \
-                        * ((row_l_prev * __expf(row_m_prev - row_m_new) * O[q_offset + q_idx * d + x]) \
+                        * ((row_l_prev * __expf(row_m_prev - row_m_new) * static_cast<float>(O[q_offset + q_idx * d + x])) \
                         + (__expf(row_m - row_m_new) * pv));
 
                     // Convert float back to half for output
-                    O[q_offset + q_idx * d + x] = o_val;
+                    O[q_offset + q_idx * d + x] = static_cast<c10::Half>(o_val);
                 }
                 m[lm_offset + q_idx] = row_m_new;
                 l[lm_offset + q_idx] = row_l_new;
@@ -116,55 +116,53 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     const int NQ = Q.size(2); const int d = Q.size(3);
     const int NKV = K.size(2);
 
-    Q = Q.to(torch::kFloat32).contiguous();
-    K = K.to(torch::kFloat32).contiguous();
-    V = V.to(torch::kFloat32).contiguous();
-    if (mask.numel() > 0) {
-        mask = mask.to(torch::kFloat32).contiguous();
-        printf("Mask type after conversion: %d\n", (int)mask.scalar_type());
-    }
-
-    printf("B: %d, nh: %d, NQ: %d, d: %d, NKV: %d", B, nh, NQ, d, NKV);
+    Q = Q.contiguous();
+    K = K.contiguous();
+    V = V.contiguous();
 
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
-    printf("Max sram size: %d\n", max_sram_size);
     float M = (float)max_sram_size / sizeof(float);
 
+    // Calculate SRAM size needed per block
     const int Bc = ceil(M / (4 * d)); const int Br = min(Bc, d);
+    const int sram_size = (Br * d * sizeof(float)) + (2 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
     const int Tr = ceil((float) NQ / Br);
     const int Tc = ceil((float) NKV / Bc);
     const float softmax_scale = 1.0 / sqrt(d);
 
-    printf("Bc: %d, Br: %d, NQ: %d, NKV: %d, Tr: %d, Tc: %d\n", Bc, Br, NQ, NKV, Tr, Tc);
 
     // Initialize O, l, m to HBM
     torch::Device device(torch::kCUDA);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
     
-    auto O = torch::zeros({B, nh, NQ, d}, options);
+    auto O = torch::zeros_like(Q);
     auto l = torch::zeros({B, nh, NQ}, options);
     auto m = torch::full({B, nh, NQ}, -INFINITY, options);
 
-    // Calculate SRAM size needed per block
-    const int sram_size = (Br * d * sizeof(float)) + (2 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
-    printf("Required Sram size: %d\n", sram_size);
 
     dim3 grid_dim(B, nh);  // batch_size x num_heads
     dim3 block_dim(Bc);  // Bc threads per block
 
     const bool has_mask = mask.numel() > 0;
+    c10::Half* mask_ptr = has_mask ? mask.data_ptr<c10::Half>() : nullptr;
+
+#ifdef DEBUG
     if (has_mask) {
         printf("with mask\n");
     } else {
         printf("no mask\n");
     }
-    float* mask_ptr = has_mask ? mask.data_ptr<float>() : nullptr;
+    printf("B: %d, nh: %d, NQ: %d, d: %d, NKV: %d", B, nh, NQ, d, NKV);
+    printf("Max sram size: %d\n", max_sram_size);
+    printf("Bc: %d, Br: %d, NQ: %d, NKV: %d, Tr: %d, Tc: %d\n", Bc, Br, NQ, NKV, Tr, Tc);
+    printf("Required Sram size: %d\n", sram_size);
+#endif
 
     forward_kernel<<<grid_dim, block_dim, sram_size>>>(
-        Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(),
+        Q.data_ptr<c10::Half>(), K.data_ptr<c10::Half>(), V.data_ptr<c10::Half>(),
         NQ, NKV, d, Tc, Tr, Bc, Br, softmax_scale,
-        l.data_ptr<float>(), m.data_ptr<float>(), O.data_ptr<float>(), mask_ptr
+        l.data_ptr<float>(), m.data_ptr<float>(), O.data_ptr<c10::Half>(), mask_ptr
     );
     return O;
 }
