@@ -3,6 +3,15 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+// add log2e to accelerate softmax
+constexpr float log2e = 1.44269504088896340736f;
+
+__forceinline__ __device__ float ptx_exp2(float x) {
+  float y;
+  asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
+}
+
 __global__
 void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
                     const int Tc, const int Tr, const int Bc, const int Br, const float softmax_scale,
@@ -77,7 +86,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                 float row_l = 0;
                 for (int y = 0; y < Bc; y++) {
                     if ((j * Bc + y) < NKV) {
-                        S[(Bc * tx) + y] = __expf(S[(Bc * tx) + y] - row_m);
+                        S[(Bc * tx) + y] = ptx_exp2(S[(Bc * tx) + y] - row_m);
                         row_l += S[(Bc * tx) + y];
                     } else {
                         S[(Bc * tx) + y] = 0.0f;
@@ -86,7 +95,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
 
                 // Compute new m and l
                 float row_m_new = max(row_m_prev, row_m);
-                float row_l_new = (__expf(row_m_prev - row_m_new) * row_l_prev) + (__expf(row_m - row_m_new) * row_l);
+                float row_l_new = (ptx_exp2(row_m_prev - row_m_new) * row_l_prev) + (ptx_exp2(row_m - row_m_new) * row_l);
 
                 // Write O, l, m to HBM
                 for (int x = 0; x < d; x++) {
@@ -96,12 +105,9 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                             pv += S[(Bc * tx) + y] * Vj[(y * d) + x];
                         }
                     }
-                    float o_val = (1 / row_l_new) \
-                        * ((row_l_prev * __expf(row_m_prev - row_m_new) * static_cast<float>(O[q_offset + q_idx * d + x])) \
-                        + (__expf(row_m - row_m_new) * pv));
-
-                    // Convert float back to half for output
-                    O[q_offset + q_idx * d + x] = static_cast<c10::Half>(o_val);
+                    O[q_offset + q_idx * d + x] = static_cast<c10::Half>((1 / row_l_new) \
+                        * ((row_l_prev * ptx_exp2(row_m_prev - row_m_new) * O[q_offset + q_idx * d + x]) \
+                        + (ptx_exp2(row_m - row_m_new) * pv)));
                 }
                 m[lm_offset + q_idx] = row_m_new;
                 l[lm_offset + q_idx] = row_l_new;
@@ -129,7 +135,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     const int sram_size = (Br * d * sizeof(float)) + (2 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
     const int Tr = ceil((float) NQ / Br);
     const int Tc = ceil((float) NKV / Bc);
-    const float softmax_scale = 1.0 / sqrt(d);
+    const float softmax_scale = log2e * 1.0 / sqrt(d);
 
 
     // Initialize O, l, m to HBM

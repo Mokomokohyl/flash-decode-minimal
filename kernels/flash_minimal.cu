@@ -116,9 +116,44 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     const int NQ = Q.size(2); const int d = Q.size(3);
     const int NKV = K.size(2);
 
+    // 创建CUDA事件用于计时
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    // 测量Q.contiguous()的时间
+    cudaEventRecord(start, 0);
     Q = Q.contiguous();
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    
+    float q_contiguous_time;
+    cudaEventElapsedTime(&q_contiguous_time, start, stop);
+    
+    // 测量K.contiguous()的时间
+    cudaEventRecord(start, 0);
     K = K.contiguous();
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    
+    float k_contiguous_time;
+    cudaEventElapsedTime(&k_contiguous_time, start, stop);
+    
+    // 测量V.contiguous()的时间
+    cudaEventRecord(start, 0);
     V = V.contiguous();
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    
+    float v_contiguous_time;
+    cudaEventElapsedTime(&v_contiguous_time, start, stop);
+
+#ifdef DEBUG
+    printf("Q.contiguous() time: %.3f ms\n", q_contiguous_time);
+    printf("K.contiguous() time: %.3f ms\n", k_contiguous_time);
+    printf("V.contiguous() time: %.3f ms\n", v_contiguous_time);
+    printf("Total contiguous time: %.3f ms\n", q_contiguous_time + k_contiguous_time + v_contiguous_time);
+#endif
 
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);

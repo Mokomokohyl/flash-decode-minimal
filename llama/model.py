@@ -252,8 +252,8 @@ class Attention(nn.Module):
                 self.head_dim,
             )
         ).cuda()
-        self.use_flash_attention_minimal = os.getenv('USE_FLASH_MINIMAL', 'true').lower() == 'true'
-        self.use_flash_v1 = os.getenv('USE_FLASH_V1', 'true').lower() == 'true'
+        self.use_flash_attention_minimal = os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true'
+        self.use_flash_attn_v1 = os.getenv('USE_FLASH_V1', 'false').lower() == 'true'
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
 
