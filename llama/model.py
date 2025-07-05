@@ -254,6 +254,7 @@ class Attention(nn.Module):
         ).cuda()
         self.use_flash_attention_minimal = os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true'
         self.use_flash_attn_v1 = os.getenv('USE_FLASH_V1', 'false').lower() == 'true'
+        self.use_flash_attn_v2 = os.getenv('USE_FLASH_V2', 'false').lower() == 'true'
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
 
@@ -321,6 +322,14 @@ class Attention(nn.Module):
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
                 output = minimal_attn.forward(xq, keys, values, empty_mask)
             method_name = "flash-attn-v1"
+# NOTE: impl of flash attn v2
+        elif self.use_flash_attn_v2:
+            if mask is not None:
+                output = minimal_attn.forward(xq, keys, values, mask)
+            else:
+                empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
+                output = minimal_attn.forward(xq, keys, values, empty_mask)
+            method_name = "flash-attn-v2"
 # NOTE: Original impl
         else:
             scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)

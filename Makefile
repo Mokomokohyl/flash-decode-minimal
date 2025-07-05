@@ -1,6 +1,20 @@
 LLAMA_CHAT_MODEL_PATH = /state/partition/ylhuang/llama-2-7b-chat
 MAX_SEQ_LEN = 1024
 
+bench_v2:
+	USE_FLASH_V2=true python3 compile_kernels.py build_ext --inplace > ./logs/bench_v2.log 2>&1 && \
+	USE_FLASH_V2=true torchrun --nproc_per_node 1 bench.py \
+		--ckpt_dir $(LLAMA_CHAT_MODEL_PATH) \
+		--tokenizer_path ./tokenizer.model \
+		--max_seq_len $(MAX_SEQ_LEN) --max_batch_size 6 >> ./logs/bench_v2.log 2>&1
+
+debug_v2:
+	USE_FLASH_V2=true python3 compile_debug_kernels.py build_ext --inplace > ./logs/debug_v2.log 2>&1 && \
+	USE_FLASH_V2=true torchrun --nproc_per_node 1 bench.py \
+		--ckpt_dir $(LLAMA_CHAT_MODEL_PATH) \
+		--tokenizer_path ./tokenizer.model \
+		--max_seq_len $(MAX_SEQ_LEN) --max_batch_size 6 >> ./logs/debug_v2.log 2>&1
+
 bench_v1:
 	USE_FLASH_V1=true python3 compile_kernels.py build_ext --inplace > ./logs/bench_v1.log 2>&1 && \
 	USE_FLASH_V1=true torchrun --nproc_per_node 1 bench.py \
