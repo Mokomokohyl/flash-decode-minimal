@@ -12,11 +12,20 @@ __forceinline__ __device__ float ptx_exp2(float x) {
   return y;
 }
 
+__forceinline__ __device__ float shfl_xor_sync(float x, int lane_mask) {
+  float y;
+  asm volatile("shfl.sync.bfly.b32 %0, %1, %2, 0x1f, 0xffffffff;"
+               : "=f"(y)
+               : "f"(x), "r"(lane_mask));
+  return y;
+}
+
 __global__
 void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
                     const int Tc, const int Tr, const int Bc, const int Br, const float softmax_scale,
                     float* l, float *m, c10::Half* O, const c10::Half* mask) {
     int tx = threadIdx.x;
+    int ty = threadIdx.y;
     int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
 
 
@@ -36,25 +45,27 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
 
         // Load Kj, Vj to SRAM
         // Each thread loads a row of K, V ([N, d])
-        int k_idx = Bc * j + tx;
-        for (int x = 0; x < d; x++) {
-            if (Bc * j + tx < NKV) {
-                Kj[(tx * d) + x] = static_cast<float>(K[kv_offset + k_idx * d + x]);
-                Vj[(tx * d) + x] = static_cast<float>(V[kv_offset + k_idx * d + x]);
+        int k_idx = Bc * j + ty;
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            if (Bc * j + ty < NKV) {
+                Kj[(ty * d) + tx * 4 + k] = static_cast<float>(K[kv_offset + k_idx * d + tx * 4 + k]);
+                Vj[(ty * d) + tx * 4 + k] = static_cast<float>(V[kv_offset + k_idx * d + tx * 4 + k]);
             } else {
-                Kj[(tx * d) + x] = 0.0f;
-                Vj[(tx * d) + x] = 0.0f;
+                Kj[(ty * d) + tx * 4 + k] = 0.0f;
+                Vj[(ty * d) + tx * 4 + k] = 0.0f;
             }
         }
         __syncthreads();  // such that the inner loop can use the correct Kj, Vj
 
         for (int i = 0; i < Tr; i++)  {
-            // Each thread assigned a row of Q. Br <= Bc, there might be more threads than Br.
-            int q_idx = i * Br + tx;
-            if (tx < Br && q_idx < NQ) {
+            // Each warp assigned a row of Q. Br <= Bc.
+            int q_idx = i * Br + ty;
+            if (ty < Br && q_idx < NQ) {
                 // Load Qi to SRAM, l and m to registers
-                for (int x = 0; x < d; x++) {
-                    Qi[(tx * d) + x] = static_cast<float>(Q[q_offset + q_idx * d + x]);
+#pragma unroll
+                for (int k = 0; k < 4; k++) {
+                    Qi[(ty * d) + tx * 4 + k] = static_cast<float>(Q[q_offset + q_idx * d + tx * 4 + k]);
                 }
 
                 float row_m_prev = m[lm_offset + q_idx];
@@ -65,19 +76,21 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                 for (int y = 0; y < Bc; y++) {
 
                     float sum = -INFINITY; 
-                    if ((j * Bc + y) < NKV) {
-                        sum = 0;
-                        for (int x = 0; x < d; x++) {
-                            sum += Qi[(tx * d) + x] * Kj[(y * d) + x];
-                        }
-                        sum *= softmax_scale;
-                        
-                        if (mask != nullptr) {
-                            int mask_idx = q_idx * NKV + (j * Bc + y);
-                            sum += static_cast<float>(mask[mask_idx]);
-                        }
+                    sum = 0;
+#pragma unroll
+                    for (int k = 0; k < 4; k++) {
+                        sum += Qi[(ty * d) + tx * 4 + k] * Kj[(y * d) + tx * 4 + k];
                     }
-                    S[(Bc * tx) + y] = sum;
+                    for (int offset = 16; offset > 0; offset /= 2) {
+                        sum += shfl_xor_sync(sum, offset);
+                    }
+                    sum *= softmax_scale;
+                    
+                    if (mask != nullptr) {
+                        int mask_idx = q_idx * NKV + (j * Bc + y);
+                        sum += static_cast<float>(mask[mask_idx]);
+                    }
+                    S[(Bc * ty) + y] = (j * Bc + y) < NKV ? sum : -INFINITY;
                     row_m = fmaxf(row_m, sum);
                 }
 
@@ -86,10 +99,10 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                 float row_l = 0;
                 for (int y = 0; y < Bc; y++) {
                     if ((j * Bc + y) < NKV) {
-                        S[(Bc * tx) + y] = ptx_exp2(S[(Bc * tx) + y] - row_m);
-                        row_l += S[(Bc * tx) + y];
+                        S[(Bc * ty) + y] = ptx_exp2(S[(Bc * ty) + y] - row_m);
+                        row_l += S[(Bc * ty) + y];
                     } else {
-                        S[(Bc * tx) + y] = 0.0f;
+                        S[(Bc * ty) + y] = 0.0f;
                     }
                 }
 
@@ -102,7 +115,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                     float pv = 0;  // Pij * Vj
                     for (int y = 0; y < Bc; y++) {
                         if ((j * Bc + y < NKV)) {
-                            pv += S[(Bc * tx) + y] * Vj[(y * d) + x];
+                            pv += S[(Bc * ty) + y] * Vj[(y * d) + x];
                         }
                     }
                     O[q_offset + q_idx * d + x] = static_cast<c10::Half>((1 / row_l_new) \
@@ -148,7 +161,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
 
 
     dim3 grid_dim(B, nh);  // batch_size x num_heads
-    dim3 block_dim(Bc);  // Bc threads per block
+    dim3 block_dim(32, Bc);  // Bc threads per block
 
     const bool has_mask = mask.numel() > 0;
     c10::Half* mask_ptr = has_mask ? mask.data_ptr<c10::Half>() : nullptr;
