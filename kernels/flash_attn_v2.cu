@@ -64,6 +64,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                     Vj[ty * d + tx * 8 + k] = static_cast<float>(V[kv_offset + kv_idx * d + tx * 8 + k]);
                 }
             } else {
+#pragma unroll
                 for (int k = 0; k < 8; k++) {
                     Kj[ty * d + tx * 8 + k] = 0.0f;
                     Vj[ty * d + tx * 8 + k] = 0.0f;
@@ -156,7 +157,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     float M = (float)max_sram_size / sizeof(float);
 
     // Calculate SRAM size needed per block
-    const int Bc = ceil(M / (5 * d)); const int Br = (NQ == 1) ? 1 : min(Bc, d);
+    const int Bc = (NQ == 1) ? ceil(M / (3 * d)) : ceil(M / (5 * d)); const int Br = (NQ == 1) ? 1 : min(Bc, d);
     const int sram_size = (2 * Br * d * sizeof(float)) + (2 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
     const int Tr = ceil((float) NQ / Br);
     const int Tc = ceil((float) NKV / Bc);
