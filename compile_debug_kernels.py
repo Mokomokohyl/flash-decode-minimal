@@ -57,7 +57,7 @@ if os.getenv('USE_FLASH_V2', 'false').lower() == 'true':
                 sources=['kernels/bind.cpp', 'kernels/flash_attn_v2.cu'],
                 extra_compile_args={
                     'cxx': ['-O2'],
-                    'nvcc': ['-O2', '-arch=sm_80', '-DDEBUG']
+                    'nvcc': ['-O2', '-arch=sm_80', '-Xptxas', '-v', '-DDEBUG']
                 }
             ),
         ],

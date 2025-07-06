@@ -20,6 +20,7 @@ __forceinline__ __device__ float shfl_xor_sync(float x, int lane_mask) {
   return y;
 }
 
+// vec_t type for accelerating dtype cast and load to registers
 template <size_t vec_size>
 struct float_vec_t {
     union {
@@ -29,7 +30,7 @@ struct float_vec_t {
     __device__ __forceinline__ float& operator[](size_t i) { return ((float*)(data))[i]; }
     __device__ __forceinline__ const float& operator[](size_t i) const { return ((const float*)(data))[i]; }
 
-    __device__ __forceinline__ void load_from_half(c10::Half* smem_ptr) {
+    __device__ __forceinline__ void load_from_half8(c10::Half* smem_ptr) {
         static_assert(vec_size % 2 == 0, "vec_size must be even");
 #pragma unroll
         for (int i = 0; i < vec_size; i += 2) {
@@ -46,17 +47,18 @@ struct float_vec_t {
         i4_1 = *reinterpret_cast<const int4*>(&smem_ptr[4]);
     }
 
-    __device__ __forceinline__ void store_to_half(c10::Half* smem_ptr) {
+    __device__ __forceinline__ void store_to_half(c10::Half* mem_ptr) {
         static_assert(vec_size % 2 == 0, "vec_size must be even");
     #pragma unroll
         for (int i = 0; i < vec_size; i += 2) {
             float2 f2 = make_float2(data[i], data[i+1]);
             __half2 h2 = __float22half2_rn(f2);
-            *reinterpret_cast<__half2*>(&smem_ptr[i]) = h2;
+            *reinterpret_cast<__half2*>(&mem_ptr[i]) = h2;
         }
     }
 };
 
+// wrapper of cp.async
 template <bool FillZero>
 __device__ __forceinline__ void cp_async_pred_load_128b(c10::Half* smem_ptr, const c10::Half* gmem_ptr, bool predicate) {
     uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
@@ -75,15 +77,18 @@ __device__ __forceinline__ void cp_async_pred_load_128b(c10::Half* smem_ptr, con
     }
 }
 
+// wrapper of cp.async.commit_group
 __device__ __forceinline__ void cp_async_commit_group() {
   asm volatile("cp.async.commit_group;\n" ::);
 }
 
+// wrapper of cp.async.wait_group
 template <size_t n>
 __device__ __forceinline__ void cp_async_wait_group() {
   asm volatile("cp.async.wait_group %0;\n" ::"n"(n));
 }
 
+template <size_t vec_size>
 __global__
 void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
                     const int Tc, const int Tr, const int Bc, const int Br, const float softmax_scale,
@@ -96,26 +101,24 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
     // Offset into Q,K,V,O,l,m - different for each batch and head
     int q_offset = (bx * gridDim.y * NQ * d) + (by * NQ * d);  // gridDim.y = nh
     int kv_offset = (bx * gridDim.y * NKV * d) + (by * NKV * d);
-    const size_t vec_size = 8;
 
     // Register for q, k, v vec
-    float_vec_t<vec_size> q_vec, k_vec, v_vec;
+    float_vec_t<vec_size> q_vec, k_vec, v_vec, o_vec;
     // Define SRAM for Q,K,V,S
     extern __shared__ uint32_t sram[];
     float* Qi = reinterpret_cast<float*>(sram);
-    float* Oi = reinterpret_cast<float*>(sram + Br * d);
-    c10::Half* Kj = reinterpret_cast<c10::Half*>(sram + 2 * Br * d);
-    c10::Half* Vj = reinterpret_cast<c10::Half*>(sram + 2 * Br * d + Bc * d);
-    float* S = reinterpret_cast<float*>(sram + 2 * Br * d + 2 * Bc * d);
+    c10::Half* Kj = reinterpret_cast<c10::Half*>(sram + Br * d);
+    c10::Half* Vj = reinterpret_cast<c10::Half*>(sram + Br * d + Bc * d);
+    float* S = reinterpret_cast<float*>(sram + Br * d + 2 * Bc * d);
 
     for (int i = 0; i < Tr; i++) {
         // Load Qi from HBM, init Oi[Br, d] = 0, l = 0, m = -INF
         int q_idx = i * Br + ty;
         if (q_idx < NQ && ty < Br) {
 #pragma unroll
-            for (int k = 0; k < 8; k++) {
-                Qi[ty * d + tx * 8 + k] = static_cast<float>(Q[q_offset + q_idx * d + tx * 8 + k]);
-                Oi[ty * d + tx * 8 + k] = 0.0f;
+            for (int k = 0; k < vec_size; k++) {
+                Qi[ty * d + tx * vec_size + k] = static_cast<float>(Q[q_offset + q_idx * d + tx * vec_size + k]);
+                o_vec[k] = 0.0f;
             }
         }
         float l_local = 0.0f;
@@ -128,14 +131,14 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
         for (int j = 0; j < num_stages_smem; j++) {
             // load k
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
-                Kj + stage_idx * Bc * d + ty * d + tx * 8, 
-                K + kv_offset + (producer_kv_idx + ty) * d + tx * 8,
+                Kj + stage_idx * Bc * d + ty * d + tx * vec_size, 
+                K + kv_offset + (producer_kv_idx + ty) * d + tx * vec_size,
                 (producer_kv_idx + ty) < NKV
             );
             cp_async_commit_group();
             cp_async_pred_load_128b<true>(
-                Vj + stage_idx * Bc * d + ty * d + tx * 8,
-                V + kv_offset + (producer_kv_idx + ty) * d + tx * 8,
+                Vj + stage_idx * Bc * d + ty * d + tx * vec_size,
+                V + kv_offset + (producer_kv_idx + ty) * d + tx * vec_size,
                 (producer_kv_idx + ty) < NKV
             );
             cp_async_commit_group();
@@ -155,15 +158,15 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                 sum = 0;
                 bool pos_valid = (q_idx < NQ) && (ty < Br) && ((consumer_kv_idx + y) < NKV);
                 if (pos_valid) {
-                    q_vec.load_from_float8(Qi + ty * d + tx * 8);
-                    k_vec.load_from_half(Kj + stage_idx * Bc * d + y * d + tx * 8);
+                    q_vec.load_from_float8(Qi + ty * d + tx * vec_size);
+                    k_vec.load_from_half8(Kj + stage_idx * Bc * d + y * d + tx * vec_size);
 #pragma unroll
-                    for (int x = 0; x < 8; x++) {
+                    for (int x = 0; x < vec_size; x++) {
                         sum += q_vec[x] * k_vec[x];
                     }
                 }
 #pragma unroll
-                for (int offset = 8; offset > 0; offset /= 2) {
+                for (int offset = d / vec_size; offset > 0; offset /= 2) {
                     sum += shfl_xor_sync(sum, offset);
                 }
                 sum *= softmax_scale;
@@ -182,8 +185,8 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
 
             // load k
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
-                Kj + stage_idx * Bc * d + ty * d + tx * 8,
-                K + kv_offset + (producer_kv_idx + ty) * d + tx * 8,
+                Kj + stage_idx * Bc * d + ty * d + tx * vec_size,
+                K + kv_offset + (producer_kv_idx + ty) * d + tx * vec_size,
                 (producer_kv_idx + ty) < NKV
             );
             cp_async_commit_group();
@@ -201,8 +204,8 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
             // scale Oi, then add PV
             if (q_idx < NQ && ty < Br) {
 #pragma unroll
-                for (int k = 0; k < 8; k++) {
-                    Oi[ty * d + tx * 8 + k] = o_scale * Oi[ty * d + tx * 8 + k];
+                for (int k = 0; k < vec_size; k++) {
+                    o_vec[k] = o_scale * o_vec[k];
                 }
             }
 
@@ -214,10 +217,10 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
             // the inner loop can be parallelized over head_dim
             for (int y = 0; y < Bc; y++) {
                 if (ty < Br && q_idx < NQ) {
-                    v_vec.load_from_half(Vj + stage_idx * Bc * d + y * d + tx * 8);
+                    v_vec.load_from_half8(Vj + stage_idx * Bc * d + y * d + tx * vec_size);
 #pragma unroll
-                    for (int k = 0; k < 8; k++) {
-                        Oi[ty * d + tx * 8 + k] += S[ty * Bc + y] * v_vec[k];
+                    for (int k = 0; k < vec_size; k++) {
+                        o_vec[k] += S[ty * Bc + y] * v_vec[k];
                     }
                 }
             }
@@ -225,8 +228,8 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
 
             // load v
             cp_async_pred_load_128b<true>(
-                Vj + stage_idx * Bc * d + ty * d + tx * 8,
-                V + kv_offset + (producer_kv_idx + ty) * d + tx * 8,
+                Vj + stage_idx * Bc * d + ty * d + tx * vec_size,
+                V + kv_offset + (producer_kv_idx + ty) * d + tx * vec_size,
                 (producer_kv_idx + ty) < NKV
             );
             cp_async_commit_group();
@@ -242,9 +245,10 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
         if (q_idx < NQ && ty < Br) {
             // Write Oi to O in HBM
 #pragma unroll
-            for (int k = 0; k < 8; k++) {
-                O[q_offset + q_idx * d + tx * 8 + k] = static_cast<c10::Half>((1 / l_local) * Oi[ty * d + tx * 8 + k]);
+            for (int k = 0; k < vec_size; k++) {
+                o_vec[k] = (1 / l_local) * o_vec[k];
             }
+            o_vec.store_to_half(O + q_offset + q_idx * d + tx * vec_size);
         }
     }
 
@@ -265,12 +269,12 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
 
     // Calculate SRAM size needed per block
     const size_t num_stages_smem = 2; // double buffer for pipeline
-    const int Bc = (NQ == 1) ? ceil(M / (3 * d)) : ceil(M / (5 * d)); const int Br = (NQ == 1) ? 1 : min(Bc, d);
-    const int sram_size = (2 * Br * d * sizeof(float)) + (2 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
+    const int Bc = (NQ == 1) ? ceil(M / (3 * d)) : ceil(M / (4 * d)); const int Br = (NQ == 1) ? 1 : min(Bc, d);
+    const int sram_size = (Br * d * sizeof(float)) + (2 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
     const int Tr = ceil((float) NQ / Br);
     const int Tc = ceil((float) NKV / Bc);
     const float softmax_scale = log2e * 1.0 / sqrt(d);
-
+    const size_t vec_size = 8;
 
     // Initialize O to HBM
     auto O = torch::zeros_like(Q);
@@ -293,7 +297,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     printf("Required Sram size: %d\n", sram_size);
 #endif
 
-    forward_kernel<<<grid_dim, block_dim, sram_size>>>(
+    forward_kernel<vec_size><<<grid_dim, block_dim, sram_size>>>(
         Q.data_ptr<c10::Half>(), K.data_ptr<c10::Half>(), V.data_ptr<c10::Half>(),
         NQ, NKV, d, Tc, Tr, Bc, Br, softmax_scale,
         O.data_ptr<c10::Half>(), mask_ptr, num_stages_smem
