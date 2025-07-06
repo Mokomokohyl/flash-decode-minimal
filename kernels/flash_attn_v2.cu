@@ -269,7 +269,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
 
     // Calculate SRAM size needed per block
     const size_t num_stages_smem = 2; // double buffer for pipeline
-    const int Bc = (NQ == 1) ? ceil(M / (3 * d)) : ceil(M / (4 * d)); const int Br = (NQ == 1) ? 1 : min(Bc, d);
+    const int Bc = 16; const int Br = (NQ == 1) ? 1 : min(Bc, d);
     const int sram_size = (Br * d * sizeof(float)) + (2 * Bc * d * sizeof(float)) + (Bc * Br * sizeof(float));
     const int Tr = ceil((float) NQ / Br);
     const int Tc = ceil((float) NKV / Bc);
