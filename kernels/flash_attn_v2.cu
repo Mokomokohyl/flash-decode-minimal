@@ -166,7 +166,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                     }
                 }
 #pragma unroll
-                for (int offset = d / vec_size; offset > 0; offset /= 2) {
+                for (int offset = 8; offset > 0; offset /= 2) {
                     sum += shfl_xor_sync(sum, offset);
                 }
                 sum *= softmax_scale;
