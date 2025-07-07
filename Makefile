@@ -4,6 +4,9 @@ MAX_SEQ_LEN = 1024
 VERSION ?= v2
 MODE ?= bench
 
+LOG_FILE_NAME ?= $(MODE)_$(VERSION)
+LOG_PATH = ./logs/$(LOG_FILE_NAME).log
+
 ifeq ($(VERSION),v1)
 	ENV_PREFIX = USE_FLASH_V1=true
 else ifeq ($(VERSION),v2)
@@ -29,10 +32,10 @@ BENCH_CMD = torchrun --nproc_per_node 1 bench.py \
 
 run:
 ifeq ($(VERSION),ref)
-	$(BENCH_CMD) > ./logs/$(MODE)_$(VERSION).log 2>&1
+	$(BENCH_CMD) > $(LOG_PATH) 2>&1
 else
 	$(ENV_PREFIX) python3 $(COMPILE_SCRIPT) build_ext --inplace > ./logs/$(MODE)_$(VERSION).log 2>&1 && \
-	$(ENV_PREFIX) $(BENCH_CMD) >> ./logs/$(MODE)_$(VERSION).log 2>&1
+	$(ENV_PREFIX) $(BENCH_CMD) >> $(LOG_PATH) 2>&1
 endif
 
 bench:
@@ -48,6 +51,7 @@ debug-v1: ; $(MAKE) debug VERSION=v1
 debug-v2: ; $(MAKE) debug VERSION=v2
 debug-minimal: ; $(MAKE) debug VERSION=minimal
 ref: ; $(MAKE) run VERSION=ref
+tmp: ; $(MAKE) bench VERSION=v2 LOG_FILE_NAME=$(LOG)
 
 help:
 	@echo "Usage:"
