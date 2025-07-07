@@ -8,7 +8,7 @@ if os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true':
         ext_modules=[
             CUDAExtension(
                 name='minimal_attn',
-                sources=['kernels/bind.cpp', 'kernels/flash_minimal.cu'],
+                sources=['kernels/bind.cpp', 'kernels/flash_attn_minimal.cu'],
                 extra_cuda_cflags=['-O2', '--arch=sm_80']
             ),
         ],
