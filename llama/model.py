@@ -255,6 +255,7 @@ class Attention(nn.Module):
         self.use_flash_attention_minimal = os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true'
         self.use_flash_attn_v1 = os.getenv('USE_FLASH_V1', 'false').lower() == 'true'
         self.use_flash_attn_v2 = os.getenv('USE_FLASH_V2', 'false').lower() == 'true'
+        self.use_flash_decode_minimal = os.getenv('USE_FLASH_DECODE_MINIMAL')
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
 
@@ -318,6 +319,13 @@ class Attention(nn.Module):
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
                 output = minimal_attn.forward(xq, keys, values, empty_mask)
             method_name = "flash-attention-minimal"
+        elif self.use_flash_decode_minimal:
+            if mask is not None:
+                output = minimal_attn.forward(xq, keys, values, mask)
+            else:
+                empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
+                output = minimal_attn.forward(xq, keys, values, empty_mask)
+            method_name = "flash-decode-minimal"
 # NOTE: impl based on minimal. flash attention v1
         elif self.use_flash_attn_v1:
             if mask is not None:

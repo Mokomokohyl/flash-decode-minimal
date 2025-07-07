@@ -13,6 +13,8 @@ else ifeq ($(VERSION),v2)
 	ENV_PREFIX = USE_FLASH_V2=true
 else ifeq ($(VERSION),minimal)
 	ENV_PREFIX = USE_FLASH_MINIMAL=true
+else ifeq ($(VERSION),fdm)
+	ENV_PREFIX = USE_FLASH_DECODE_MINIMAL=true
 else ifeq ($(VERSION),ref)
 	ENV_PREFIX = 
 else
@@ -46,9 +48,11 @@ debug:
 
 bench-v1: ; $(MAKE) bench VERSION=v1
 bench-v2: ; $(MAKE) bench VERSION=v2
+bench-fdm: ; $(MAKE) bench VERSION=fdm
 bench-minimal: ; $(MAKE) bench VERSION=minimal
 debug-v1: ; $(MAKE) debug VERSION=v1
 debug-v2: ; $(MAKE) debug VERSION=v2
+debug-fdm: ; $(MAKE) debug VERSION=fdm
 debug-minimal: ; $(MAKE) debug VERSION=minimal
 ref: ; $(MAKE) run VERSION=ref
 tmp: ; $(MAKE) bench VERSION=v2 LOG_FILE_NAME=$(LOG)
