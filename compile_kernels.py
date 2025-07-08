@@ -78,9 +78,4 @@ if ext_modules:
         cmdclass={
             'build_ext': BuildExtension.with_options(no_python_abi_suffix=True)
         },
-        options={
-            'build_ext': {
-                'build_lib': os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama")
-            }
-        }
     )

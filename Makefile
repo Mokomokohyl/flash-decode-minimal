@@ -53,6 +53,12 @@ bench:
 debug:
 	$(MAKE) run MODE=debug VERSION=$(VERSION)
 
+clean:
+	@echo "Cleaning up build artifacts..."
+	@rm -rf build/ dist/ *.egg-info
+	@rm -rf llama/kernels/* 
+	@find . -name "__pycache__" -type d -exec rm -r {} +
+
 bench-v1: ; $(MAKE) bench VERSION=v1
 bench-v2: ; $(MAKE) bench VERSION=v2
 bench-fdm: ; $(MAKE) bench VERSION=fdm
