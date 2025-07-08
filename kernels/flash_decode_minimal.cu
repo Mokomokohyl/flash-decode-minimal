@@ -537,7 +537,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
         printf("no mask\n");
     }
     printf("B: %d, nh: %d, NQ: %d, d: %d, NKV: %d", B, nh, NQ, d, NKV);
-    printf("Max sram size: %d\n", max_sram_size);
+    printf("Default sram size: %d\n", max_sram_size);
     printf("Bc: %d, Br: %d, NQ: %d, NKV: %d, Tr: %d, Tc: %d\n", Bc, Br, NQ, NKV, Tr, Tc);
     printf("Required Sram size: %d\n", sram_size);
 #endif
