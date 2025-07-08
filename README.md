@@ -16,6 +16,7 @@ Update the `LLAMA_CHAT_MODEL_PATH` to your Llama-7B-chat model path in `Makefile
 - `make bench-minimal-v2`: Runs my implementation of Flash Attention V2 of flash-attention-minimal style. (kernels/flash_attn_minimal_v2.cu)
 - `make bench-v2`: Runs my implementation of Flash Attention V2. Add double buffer pipeline. (kernels/flash_attn_v2.cu)
 - `make bench-fdm`: Runs flash-decode-minimal kernel, referring to https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/attention/decode.cuh (kernels/flash_decode_minimal.cu)
+- `make bench-fdm-fixkv`: 
 
 The terminal outputs are redirected to logs/bench_*.log.
 

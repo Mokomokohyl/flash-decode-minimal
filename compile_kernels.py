@@ -113,7 +113,7 @@ if os.getenv('USE_FLASH_DECODE_FIXKV', 'false').lower() == 'true':
         ext_modules=[
             CUDAExtension(
                 name='minimal_attn',
-                sources=['kernels/bind_fix_len_kv.cpp', 'kernels/flash_decode_fixed_len_kv_cache.cu'],
+                sources=['kernels/bind.cpp', 'kernels/flash_decode_fixed_len_kv_cache.cu'],
                 extra_compile_args={
                     'cxx': ['-O2'],
                     'nvcc': ['-O2', '-arch=sm_80']

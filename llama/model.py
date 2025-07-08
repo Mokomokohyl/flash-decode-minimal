@@ -342,10 +342,10 @@ class Attention(nn.Module):
 # NOTE: impl of flash-decode with fixed length kv cache
         elif self.use_flash_decode_fixkv:
             if mask is not None:
-                output = minimal_attn.forward(xq, keys, values, mask, self.kv_stride_h)
+                output = minimal_attn.forward(xq, keys, values, mask)
             else:
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-                output = minimal_attn.forward(xq, keys, values, empty_mask, self.kv_stride_h)
+                output = minimal_attn.forward(xq, keys, values, empty_mask)
             method_name = "flash-decode-minimal-fix-kv-length"
 # NOTE: impl based on minimal. flash attention v1
         elif self.use_flash_attn_v1:
