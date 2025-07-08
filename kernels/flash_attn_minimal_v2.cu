@@ -22,7 +22,7 @@ __forceinline__ __device__ float shfl_xor_sync(float x, int lane_mask) {
 
 __host__ __device__
 struct TensorStrides {
-    long b, h, n, d; // 分别对应 batch, head, sequence, dimension 的步长
+    long b, h, n, d; // batch, head, sequence, dimension
 };
 
 __global__

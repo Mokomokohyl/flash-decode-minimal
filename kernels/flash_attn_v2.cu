@@ -90,7 +90,7 @@ __device__ __forceinline__ void cp_async_wait_group() {
 
 __host__ __device__
 struct TensorStrides {
-    long b, h, n, d; // 分别对应 batch, head, sequence, dimension 的步长
+    long b, h, n, d; // batch, head, sequence, dimension
 };
 
 template <size_t vec_size>

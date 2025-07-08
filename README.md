@@ -56,12 +56,27 @@ and go to /logs/profile_contiguous.log to check the profile results.
 
 When I revised flash-attn-minimal kernel so that it receives q_stride and kv_stride struct for indexing, its performance got worse than calling Q/K/V.contiguous()(Approximately 9.43 tokens/s on A100). Then I restore the Q/K/V.contiguous() calling. I didn't figure out why.
 
-My understanding of threadBlock arrangements of the kernels:
+Other notes for the kernels:  
+The grid dim are always (B, nh) for the following kernels.
 - `minimal`: 
-    + In prefill stage, each (tx) loads a token of Q, a token of K/V and is reponsible for generating a token of O; 
-    + In decode stage, there will only be one thread working for caculation of O. Only K/V loading 
+    + In prefill stage, each (tx) loads a token of Q/K/V and is reponsible for generating a token of O; 
+    + In decode stage, there will only be one thread working for caculation of O. Only K/V loading is parallelized over the Bc threads.
 
-- `v1`: 
+- `v1`:
+    + Add ptx_exp2 to accelerate exp.
+    + Replace tx with ty and set blockDim.x to 32. With `shfl_xor_sync` to perform in-warp reduction, we can gain parralellism in head_dim dimension. Each (ty, tx) loads 4 dimensions in the 128 dimensions of a token of Q/K/V. A token is assigned to (ty, :). In decode stage, there is still only one warp doing all the calculation of O.
+
+- `minimal-v2`
+    bdx = 16. (ty, tx) loads 8 dims in 128 dims of a token of Q/K/V. For each (ty, tx), load Q once and iterate over K/V. The rearrange of loops for parallelizing P*V is interesting.
+
+- `v2`
+    - Double buffer pipelining for K/V loading.
+    - Vectorized load/store between HBM/Shared Memory and registers.
+
+- `fdm`
+    - seq_len -> bdy * tile_size_per_bdx(ty) -> tile_size_per_bdx(tx). For each ty, assign 8 tokens; for each tx, assign 8 dims. The window moves 64 tokens right along seq_len + cache_len for each iteration. After reaching the end, we merge the states of ty = 1,...,bdy-1 thread groups.
+    - The calculation in seq_len dimension is then parallelzed. We do not have to iterate over K/V from left to right. Merge the KV clips in the right way and we get right outputs.
+
 
 ### TODOs
 

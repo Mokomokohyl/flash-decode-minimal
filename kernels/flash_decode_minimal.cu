@@ -137,7 +137,7 @@ struct state_t {
 
 __host__ __device__
 struct TensorStrides {
-    long b, h, n, d; // 分别对应 batch, head, sequence, dimension 的步长
+    long b, h, n, d; // batch, head, sequence, dimension
 };
 
 // same as flash_attn_v2.cu. removed mask_ptr check
