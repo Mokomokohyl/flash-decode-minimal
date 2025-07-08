@@ -120,13 +120,6 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     K = K.contiguous();
     V = V.contiguous();
 
-#ifdef DEBUG
-    printf("Q.contiguous() time: %.3f ms\n", q_contiguous_time);
-    printf("K.contiguous() time: %.3f ms\n", k_contiguous_time);
-    printf("V.contiguous() time: %.3f ms\n", v_contiguous_time);
-    printf("Total contiguous time: %.3f ms\n", q_contiguous_time + k_contiguous_time + v_contiguous_time);
-#endif
-
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
     float M = (float)max_sram_size / sizeof(float);

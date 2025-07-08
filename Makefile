@@ -19,8 +19,6 @@ else ifeq ($(VERSION),minimal_v2)
 	ENV_PREFIX += USE_FLASH_MINIMAL_V2=true
 else ifeq ($(VERSION),fdm)
 	ENV_PREFIX += USE_FLASH_DECODE_MINIMAL=true
-else ifeq ($(VERSION),fdm_fixkv)
-	ENV_PREFIX += USE_FLASH_DECODE_FIXKV=true
 else ifeq ($(VERSION),ref)
 	ENV_PREFIX = 
 else
@@ -67,7 +65,6 @@ clean_logs:
 bench-v1: ; $(MAKE) bench VERSION=v1
 bench-v2: ; $(MAKE) bench VERSION=v2
 bench-fdm: ; $(MAKE) bench VERSION=fdm
-bench-fdm-fixkv: ; $(MAKE) bench VERSION=fdm_fixkv
 bench-minimal: ; $(MAKE) bench VERSION=minimal
 bench-minimal-v2: ; $(MAKE) bench VERSION=minimal_v2
 debug-v1: ; $(MAKE) debug VERSION=v1
@@ -75,7 +72,6 @@ debug-v2: ; $(MAKE) debug VERSION=v2
 debug-fdm: ; $(MAKE) debug VERSION=fdm
 debug-minimal: ; $(MAKE) debug VERSION=minimal
 debug-minimal-v2: ; $(MAKE) debug VERSION=minimal_v2
-debug-fdm-fixkv: ; $(MAKE) debug VERSION=fdm_fixkv
 ref: ; $(MAKE) run VERSION=ref
 bench-contiguous: ; $(MAKE) bench VERSION=fdm LOG_FILE_NAME=profile_contiguous
 

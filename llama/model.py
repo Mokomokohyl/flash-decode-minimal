@@ -22,7 +22,6 @@ from .kernels import v1
 from .kernels import minimal_v2
 from .kernels import v2
 from .kernels import fdm
-from .kernels import fdm_fixkv
 
 @dataclass
 class ModelArgs:
@@ -267,7 +266,6 @@ class Attention(nn.Module):
 
         # Kernel choice
         kernel_map = {
-            "USE_FLASH_DECODE_FIXKV": (fdm_fixkv.forward, "flash-decode-minimal-fix-kv-length"),
             "USE_FLASH_DECODE_MINIMAL": (fdm.forward, "flash-decode-minimal"),
             "USE_FLASH_V2": (v2.forward, "flash-attn-v2"),
             "USE_FLASH_MINIMAL_V2": (minimal_v2.forward, "flash-attn-minimal-v2"),

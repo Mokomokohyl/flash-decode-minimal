@@ -135,20 +135,25 @@ struct state_t {
     }
 };
 
+__host__ __device__
+struct TensorStrides {
+    long b, h, n, d; // 分别对应 batch, head, sequence, dimension 的步长
+};
+
 // same as flash_attn_v2.cu. removed mask_ptr check
 template <size_t vec_size>
 __global__
 void prefill_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
                     const int Tc, const int Tr, const int Bc, const int Br, const float softmax_scale,
-                    c10::Half* O, const c10::Half* mask, const size_t num_stages_smem) {
+                    c10::Half* O, const c10::Half* mask, const size_t num_stages_smem, TensorStrides q_stride, TensorStrides kv_stride) {
     int tx = threadIdx.x; // head_dim
     int ty = threadIdx.y; // a token of Q
     int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
 
 
     // Offset into Q,K,V,O,l,m - different for each batch and head
-    int q_offset = (bx * gridDim.y * NQ * d) + (by * NQ * d);  // gridDim.y = nh
-    int kv_offset = (bx * gridDim.y * NKV * d) + (by * NKV * d);
+    int q_offset = (bx * q_stride.b) + (by * q_stride.h);  // gridDim.y = nh
+    int kv_offset = (bx * kv_stride.b) + (by * kv_stride.h);
 
     // Register for q, k, v vec, state_t
     float_vec_t<vec_size> q_vec, k_vec, v_vec;
@@ -166,7 +171,7 @@ void prefill_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
         if (q_idx < NQ && ty < Br) {
 #pragma unroll
             for (int k = 0; k < vec_size; k++) {
-                Qi[ty * d + tx * vec_size + k] = static_cast<float>(Q[q_offset + q_idx * d + tx * vec_size + k]);
+                Qi[ty * d + tx * vec_size + k] = static_cast<float>(Q[q_offset + q_idx * q_stride.n + tx * vec_size + k]);
             }
         }
         st.init();
@@ -179,13 +184,13 @@ void prefill_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
             // load k
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
                 Kj + stage_idx * Bc * d + ty * d + tx * vec_size, 
-                K + kv_offset + (producer_kv_idx + ty) * d + tx * vec_size,
+                K + kv_offset + (producer_kv_idx + ty) * kv_stride.n + tx * vec_size,
                 (producer_kv_idx + ty) < NKV
             );
             cp_async_commit_group();
             cp_async_pred_load_128b<true>(
                 Vj + stage_idx * Bc * d + ty * d + tx * vec_size,
-                V + kv_offset + (producer_kv_idx + ty) * d + tx * vec_size,
+                V + kv_offset + (producer_kv_idx + ty) * kv_stride.n + tx * vec_size,
                 (producer_kv_idx + ty) < NKV
             );
             cp_async_commit_group();
@@ -218,7 +223,7 @@ void prefill_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                 }
                 sum *= softmax_scale;
                 if (pos_valid) {
-                    int mask_idx = q_idx * NKV + consumer_kv_idx * Bc + y;
+                    int mask_idx = q_idx * NKV + consumer_kv_idx + y;
                     S[ty * Bc + y] = sum + static_cast<float>(mask[mask_idx]);
                     st.m = fmaxf(S[ty * Bc + y], st.m);
                 } 
@@ -229,7 +234,7 @@ void prefill_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
             // load k
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
                 Kj + stage_idx * Bc * d + ty * d + tx * vec_size,
-                K + kv_offset + (producer_kv_idx + ty) * d + tx * vec_size,
+                K + kv_offset + (producer_kv_idx + ty) * kv_stride.n + tx * vec_size,
                 (producer_kv_idx + ty) < NKV
             );
             cp_async_commit_group();
@@ -272,7 +277,7 @@ void prefill_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
             // load v
             cp_async_pred_load_128b<true>(
                 Vj + stage_idx * Bc * d + ty * d + tx * vec_size,
-                V + kv_offset + (producer_kv_idx + ty) * d + tx * vec_size,
+                V + kv_offset + (producer_kv_idx + ty) * kv_stride.n + tx * vec_size,
                 (producer_kv_idx + ty) < NKV
             );
             cp_async_commit_group();
@@ -291,7 +296,7 @@ void prefill_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
             for (int k = 0; k < vec_size; k++) {
                 st.o_vec[k] = (1 / st.l) * st.o_vec[k];
             }
-            st.o_vec.store_to_half(O + q_offset + q_idx * d + tx * vec_size);
+            st.o_vec.store_to_half(O + ((bx * gridDim.y * NQ * d) + (by * NQ * d)) + q_idx * d + tx * vec_size);
         }
     }
 
@@ -302,14 +307,14 @@ template <size_t vec_size, size_t tile_size_per_bdx, size_t num_stages_smem>
 __global__
 void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
                     const int Tc, const int Bc, const float softmax_scale,
-                    c10::Half* O, const int bdx, const int bdy) {
+                    c10::Half* O, const int bdx, const int bdy, TensorStrides q_stride, TensorStrides kv_stride) {
     int tx = threadIdx.x; // head_dim
     int ty = threadIdx.y; // in decode kernel, use ty to devide Bc into bdy * tile_size_per_bdx.
     int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
 
     // Offset into Q,K,V,O,l,m - different for each batch and head
-    int q_offset = (bx * gridDim.y * NQ * d) + (by * NQ * d);  // gridDim.y = nh
-    int kv_offset = (bx * gridDim.y * NKV * d) + (by * NKV * d);
+    int q_offset = (bx * q_stride.b) + (by * q_stride.h);  // gridDim.y = nh
+    int kv_offset = (bx * kv_stride.b) + (by * kv_stride.h);
 
     // Register for q, k, v vec
     float_vec_t<vec_size> q_vec, k_vec, v_vec;
@@ -337,7 +342,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             // load k
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
                 Kj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size, 
-                K + kv_offset + cur_kv_token * d + tx * vec_size,
+                K + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
                 cur_kv_token < NKV
             );
         }
@@ -346,7 +351,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             int cur_kv_token = producer_kv_idx + ty * tile_size_per_bdx + j;
             cp_async_pred_load_128b<true>(
                 Vj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size,
-                V + kv_offset + cur_kv_token * d + tx * vec_size,
+                V + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
                 cur_kv_token < NKV
             );
         }
@@ -356,6 +361,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
     }
 
     // pipeline
+#pragma unroll 2
     for (int j = 0; j < Tc; j++) {
         float m_prev = st.m;
         float sum = 0.0f;
@@ -393,7 +399,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             int cur_kv_token = producer_kv_idx + ty * tile_size_per_bdx + j;
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
                 Kj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size,
-                K + kv_offset + cur_kv_token * d + tx * vec_size,
+                K + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
                 cur_kv_token < NKV
             );
         }
@@ -439,7 +445,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             int cur_kv_token = producer_kv_idx + ty * tile_size_per_bdx + y;
             cp_async_pred_load_128b<true>(
                 Vj + stage_idx * Bc * d + (ty * tile_size_per_bdx + y) * d + tx * vec_size,
-                V + kv_offset + cur_kv_token * d + tx * vec_size,
+                V + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
                 cur_kv_token < NKV
             );
         }
@@ -478,7 +484,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
     // final scale
     st.normalize();
     // Write Oi to O in HBM
-    st.o_vec.store_to_half(O + q_offset + tx * vec_size);
+    st.o_vec.store_to_half(O + ((bx * gridDim.y * NQ * d) + (by * NQ * d)) + tx * vec_size);
 
 }
 
@@ -487,9 +493,10 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     const int NQ = Q.size(2); const int d = Q.size(3);
     const int NKV = K.size(2);
 
-    Q = Q.contiguous();
-    K = K.contiguous();
-    V = V.contiguous();
+    TensorStrides q_stride = {Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3)};
+    TensorStrides kv_stride = {K.stride(0), K.stride(1), K.stride(2), K.stride(3)};
+    TORCH_CHECK(kv_stride.d == 1, "kv_stride in head_dim must be 1");
+    TORCH_CHECK(q_stride.d == 1, "q_stride in head_dim must be 1");
 
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
@@ -524,7 +531,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     );
 
     // Initialize O to HBM
-    auto O = torch::zeros_like(Q);
+    auto O = torch::zeros({B, nh, NQ, d}, Q.options());
 
 
     const bool has_mask = mask.numel() > 0;
@@ -548,7 +555,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
         prefill_kernel<vec_size><<<grid_dim, block_dim, sram_size>>>(
             Q.data_ptr<c10::Half>(), K.data_ptr<c10::Half>(), V.data_ptr<c10::Half>(),
             NQ, NKV, d, Tc, Tr, Bc, Br, softmax_scale,
-            O.data_ptr<c10::Half>(), mask_ptr, num_stages_smem
+            O.data_ptr<c10::Half>(), mask_ptr, num_stages_smem, q_stride, kv_stride
         );
     } else {
         dim3 grid_dim(B, nh);  // batch_size x num_heads
@@ -556,7 +563,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
         decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem><<<grid_dim, block_dim, sram_size>>>(
             Q.data_ptr<c10::Half>(), K.data_ptr<c10::Half>(), V.data_ptr<c10::Half>(),
             NQ, NKV, d, Tc, Bc, softmax_scale,
-            O.data_ptr<c10::Half>(), bdx, bdy
+            O.data_ptr<c10::Half>(), bdx, bdy, q_stride, kv_stride
         );
     }
     return O;

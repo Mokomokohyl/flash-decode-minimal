@@ -29,10 +29,6 @@ ALL_KERNELS = {
         "sources": ['kernels/bind.cpp', 'kernels/flash_decode_minimal.cu'],
         "extra_compile_args": {'cxx': ['-O2'], 'nvcc': base_nvcc_flags}
     },
-    "fdm_fixkv": {
-        "sources": ['kernels/bind.cpp', 'kernels/flash_decode_fixed_len_kv_cache.cu'],
-        "extra_compile_args": {'cxx': ['-O2'], 'nvcc': base_nvcc_flags}
-    }
 }
 
 def get_ext_modules():
@@ -49,7 +45,6 @@ def get_ext_modules():
         if os.getenv('USE_FLASH_V2', 'false').lower() == 'true': kernels_to_compile.append('v2')
         if os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true': kernels_to_compile.append('minimal_v2')
         if os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true': kernels_to_compile.append('fdm')
-        if os.getenv('USE_FLASH_DECODE_FIXKV', 'false').lower() == 'true': kernels_to_compile.append('fdm_fixkv')
 
     ext_modules = []
     for kernel_name in kernels_to_compile:
