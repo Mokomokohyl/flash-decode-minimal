@@ -79,18 +79,4 @@ debug-fdm-fixkv: ; $(MAKE) debug VERSION=fdm_fixkv
 ref: ; $(MAKE) run VERSION=ref
 bench-contiguous: ; $(MAKE) bench VERSION=fdm LOG_FILE_NAME=profile_contiguous
 
-help:
-	@echo "Usage:"
-	@echo "  make run VERSION=<version> MODE=<mode>"
-	@echo "  make bench [VERSION=<version>]		# default: v2"
-	@echo "  make debug [VERSION=<version>]		# default: v2"
-	@echo ""
-	@echo "Versions: v1, v2, minimal, ref"
-	@echo "Modes: bench, debug"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make bench				  # bench v2"
-	@echo "  make debug VERSION=v1	  # debug v1"
-	@echo "  make bench-minimal		 # bench minimal"
-
 .PHONY: run bench debug help bench-v1 bench-v2 bench-minimal debug-v1 debug-v2 debug-minimal ref

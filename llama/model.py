@@ -281,6 +281,13 @@ class Attention(nn.Module):
                 self.attention_kernel = kernel_fn
                 self.method_name = name
                 break
+
+        # Profiler
+        self.prefill_duration_ms = 0.0
+        self.prefill_call_count = 0
+        self.decode_duration_ms = 0.0
+        self.decode_call_count = 0
+        self.total_tokens_processed = 0
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
         self.total_duration_ms = 0.0
@@ -343,11 +350,32 @@ class Attention(nn.Module):
         torch.cuda.synchronize()
         
         duration_ms = self.start_event.elapsed_time(self.end_event)
-        print(f"[{self.method_name}] Attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
         self.total_duration_ms += duration_ms
+
+        self.total_tokens_processed += xq.size(0) * xq.size(2) # bsz * seqlen
+        if xq.size(2) > 1: # Prefill
+            self.prefill_duration_ms += duration_ms
+            self.prefill_call_count += 1
+        else: # Decode
+            self.decode_duration_ms += duration_ms
+            self.decode_call_count += 1
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
+
+    # profile summary
+    def print_summary(self, layer_id):
+        print(f"--- Layer {layer_id} Attention Summary ({self.method_name}) ---")
+        if self.prefill_call_count > 0:
+            avg_prefill_time = self.prefill_duration_ms / self.prefill_call_count
+            print(f"  Prefill : {self.prefill_duration_ms:.2f} ms total, {self.prefill_call_count} calls, {avg_prefill_time:.2f} ms/call")
+        
+        if self.decode_call_count > 0:
+            avg_decode_time = self.decode_duration_ms / self.decode_call_count
+            avg_decode_token_time = self.decode_duration_ms / self.total_tokens_processed if self.total_tokens_processed > 0 else 0
+            print(f"  Decode  : {self.decode_duration_ms:.2f} ms total, {self.decode_call_count} calls, {avg_decode_time:.2f} ms/call")
+            print(f"  Tokens Processed: {self.total_tokens_processed}, Avg Time/Token: {avg_decode_token_time:.3f} ms")
+        print("-" * (30 + len(self.method_name)))
 
 
 class FeedForward(nn.Module):

@@ -103,10 +103,6 @@ If a question does not make any sense, or is not factually coherent, explain why
         tokens = generator.tokenizer.encode(generated_text, bos=False, eos=False)
         total_tokens += len(tokens)
     
-    tokens_per_second = total_tokens / total_time if total_time > 0 else 0
-    total_attention_time = 0.0
-    for layer in generator.model.layers:
-        total_attention_time += layer.attention.total_duration_ms
 
     for dialog, result in zip(dialogs, results):
         for msg in dialog:
@@ -117,6 +113,11 @@ If a question does not make any sense, or is not factually coherent, explain why
         print("\n==================================\n")
     
     print(f"\n{'='*50}")
+    tokens_per_second = total_tokens / total_time if total_time > 0 else 0
+    total_attention_time = 0.0
+    for i, layer in enumerate(generator.model.layers):
+        total_attention_time += layer.attention.total_duration_ms
+        layer.attention.print_summary(i)
     print(f"Performance Statistics:")
     print(f"Total completion time: {total_time:.3f} seconds")
     print(f"Total Attention Time: {total_attention_time:.3f} ms")
