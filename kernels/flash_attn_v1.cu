@@ -20,18 +20,24 @@ __forceinline__ __device__ float shfl_xor_sync(float x, int lane_mask) {
   return y;
 }
 
+__host__ __device__
+struct TensorStrides {
+    long b, h, n, d; // 分别对应 batch, head, sequence, dimension 的步长
+};
+
 __global__
 void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
                     const int Tc, const int Tr, const int Bc, const int Br, const float softmax_scale,
-                    float* l, float *m, c10::Half* O, const c10::Half* mask) {
+                    float* l, float *m, c10::Half* O, const c10::Half* mask, TensorStrides q_stride, TensorStrides kv_stride) {
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
 
 
     // Offset into Q,K,V,O,l,m - different for each batch and head
-    int q_offset = (bx * gridDim.y * NQ * d) + (by * NQ * d);  // gridDim.y = nh
-    int kv_offset = (bx * gridDim.y * NKV * d) + (by * NKV * d);
+    int o_offset = (bx * gridDim.y * NQ * d) + (by * NQ * d);  // gridDim.y = nh
+    int q_offset = (bx * q_stride.b) + (by * q_stride.h);  // gridDim.y = nh
+    int kv_offset = (bx * kv_stride.b) + (by * kv_stride.h);
     int lm_offset = (bx * gridDim.y * NQ) + (by * NQ);  // offset for l and m
 
     // Define SRAM for Q,K,V,S
@@ -49,8 +55,8 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
             if (Bc * j + ty < NKV) {
-                Kj[(ty * d) + tx * 4 + k] = static_cast<float>(K[kv_offset + k_idx * d + tx * 4 + k]);
-                Vj[(ty * d) + tx * 4 + k] = static_cast<float>(V[kv_offset + k_idx * d + tx * 4 + k]);
+                Kj[(ty * d) + tx * 4 + k] = static_cast<float>(K[kv_offset + k_idx * kv_stride.n + tx * 4 + k]);
+                Vj[(ty * d) + tx * 4 + k] = static_cast<float>(V[kv_offset + k_idx * kv_stride.n + tx * 4 + k]);
             } else {
                 Kj[(ty * d) + tx * 4 + k] = 0.0f;
                 Vj[(ty * d) + tx * 4 + k] = 0.0f;
@@ -65,7 +71,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                 // Load Qi to SRAM, l and m to registers
 #pragma unroll
                 for (int k = 0; k < 4; k++) {
-                    Qi[(ty * d) + tx * 4 + k] = static_cast<float>(Q[q_offset + q_idx * d + tx * 4 + k]);
+                    Qi[(ty * d) + tx * 4 + k] = static_cast<float>(Q[q_offset + q_idx * q_stride.n + tx * 4 + k]);
                 }
 
                 float row_m_prev = m[lm_offset + q_idx];
@@ -118,8 +124,8 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                             pv += S[(Bc * ty) + y] * Vj[(y * d) + x];
                         }
                     }
-                    O[q_offset + q_idx * d + x] = static_cast<c10::Half>((1 / row_l_new) \
-                        * ((row_l_prev * ptx_exp2(row_m_prev - row_m_new) * O[q_offset + q_idx * d + x]) \
+                    O[o_offset + q_idx * d + x] = static_cast<c10::Half>((1 / row_l_new) \
+                        * ((row_l_prev * ptx_exp2(row_m_prev - row_m_new) * O[o_offset + q_idx * d + x]) \
                         + (ptx_exp2(row_m - row_m_new) * pv)));
                 }
                 m[lm_offset + q_idx] = row_m_new;
@@ -135,9 +141,10 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     const int NQ = Q.size(2); const int d = Q.size(3);
     const int NKV = K.size(2);
 
-    Q = Q.contiguous();
-    K = K.contiguous();
-    V = V.contiguous();
+    TensorStrides q_stride = {Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3)};
+    TensorStrides kv_stride = {K.stride(0), K.stride(1), K.stride(2), K.stride(3)};
+    TORCH_CHECK(kv_stride.d == 1, "kv_stride in head_dim must be 1");
+    TORCH_CHECK(q_stride.d == 1, "q_stride in head_dim must be 1");
 
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
@@ -155,7 +162,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     torch::Device device(torch::kCUDA);
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
     
-    auto O = torch::zeros_like(Q);
+    auto O = torch::zeros({B, nh, NQ, d}, Q.options());
     auto l = torch::zeros({B, nh, NQ}, options);
     auto m = torch::full({B, nh, NQ}, -INFINITY, options);
 
@@ -181,7 +188,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     forward_kernel<<<grid_dim, block_dim, sram_size>>>(
         Q.data_ptr<c10::Half>(), K.data_ptr<c10::Half>(), V.data_ptr<c10::Half>(),
         NQ, NKV, d, Tc, Tr, Bc, Br, softmax_scale,
-        l.data_ptr<float>(), m.data_ptr<float>(), O.data_ptr<c10::Half>(), mask_ptr
+        l.data_ptr<float>(), m.data_ptr<float>(), O.data_ptr<c10::Half>(), mask_ptr, q_stride, kv_stride
     );
     return O;
 }
