@@ -1,4 +1,4 @@
-LLAMA_CHAT_MODEL_PATH = /state/partition/ylhuang/llama-2-7b-chat
+LLAMA_CHAT_MODEL_PATH ?= /path/to/llama/model # revise to run chat completion and bench
 MAX_SEQ_LEN = 1024
 
 VERSION ?= v2
