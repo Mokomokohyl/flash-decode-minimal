@@ -118,7 +118,7 @@ struct state_t {
 
     // the core of flash attention algorithm
     __device__ __forceinline__ void merge(const float_vec_t<vec_size>& o_vec_other, float l_other, float m_other) {
-        float m_prev = m, l_prev = l;
+        float m_prev = m;
         m = fmaxf(m_prev, m_other);
         l = l_other * ptx_exp2(m_other - m) + l * ptx_exp2(m_prev - m);
 #pragma unroll

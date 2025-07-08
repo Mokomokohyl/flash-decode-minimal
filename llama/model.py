@@ -258,6 +258,7 @@ class Attention(nn.Module):
         self.use_flash_decode_minimal = os.getenv('USE_FLASH_DECODE_MINIMAL')
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
+        self.total_duration_ms = 0.0
 
     def forward(
         self,
@@ -357,6 +358,7 @@ class Attention(nn.Module):
         
         duration_ms = self.start_event.elapsed_time(self.end_event)
         print(f"[{method_name}] Attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
+        self.total_duration_ms += duration_ms
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)

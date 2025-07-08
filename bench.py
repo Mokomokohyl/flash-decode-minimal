@@ -104,6 +104,9 @@ If a question does not make any sense, or is not factually coherent, explain why
         total_tokens += len(tokens)
     
     tokens_per_second = total_tokens / total_time if total_time > 0 else 0
+    total_attention_time = 0.0
+    for layer in generator.model.layers:
+        total_attention_time += layer.attention.total_duration_ms
 
     for dialog, result in zip(dialogs, results):
         for msg in dialog:
@@ -116,6 +119,7 @@ If a question does not make any sense, or is not factually coherent, explain why
     print(f"\n{'='*50}")
     print(f"Performance Statistics:")
     print(f"Total completion time: {total_time:.3f} seconds")
+    print(f"Total Attention Time: {total_attention_time:.3f} ms")
     print(f"Number of dialogs: {len(dialogs)}")
     print(f"Total generated tokens: {total_tokens}")
     print(f"Tokens per second: {tokens_per_second:.2f}")

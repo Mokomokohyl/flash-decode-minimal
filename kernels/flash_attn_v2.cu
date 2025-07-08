@@ -112,7 +112,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
     float* S = reinterpret_cast<float*>(sram + Br * d + 2 * Bc * d);
 
     for (int i = 0; i < Tr; i++) {
-        // Load Qi from HBM, init Oi[Br, d] = 0, l = 0, m = -INF
+        // Load Qi from HBM, init Oi[Br, vec_size] = 0, l = 0, m = -INF
         int q_idx = i * Br + ty;
         if (q_idx < NQ && ty < Br) {
 #pragma unroll
@@ -127,7 +127,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
         int stage_idx = 0;
         int producer_kv_idx = 0;
         int consumer_kv_idx = 0;
-        //prelogue for pipeline
+        //prelogue for pipeline. fill data for K1, V1, K2, V2
         for (int j = 0; j < num_stages_smem; j++) {
             // load k
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
@@ -147,6 +147,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
         }
 
         // pipeline
+#pragma unroll 2
         for (int j = 0; j < Tc; j++) {
             float m_prev = m_local;
             float sum = 0.0f;
