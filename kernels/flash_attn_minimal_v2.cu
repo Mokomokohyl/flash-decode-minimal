@@ -20,18 +20,24 @@ __forceinline__ __device__ float shfl_xor_sync(float x, int lane_mask) {
   return y;
 }
 
+__host__ __device__
+struct TensorStrides {
+    long b, h, n, d; // 分别对应 batch, head, sequence, dimension 的步长
+};
+
 __global__
 void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
                     const int Tc, const int Tr, const int Bc, const int Br, const float softmax_scale,
-                    c10::Half* O, const c10::Half* mask) {
+                    c10::Half* O, const c10::Half* mask, TensorStrides q_stride, TensorStrides kv_stride) {
     int tx = threadIdx.x; // head_dim
     int ty = threadIdx.y; // a token of Q
     int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
 
 
     // Offset into Q,K,V,O,l,m - different for each batch and head
-    int q_offset = (bx * gridDim.y * NQ * d) + (by * NQ * d);  // gridDim.y = nh
-    int kv_offset = (bx * gridDim.y * NKV * d) + (by * NKV * d);
+    int o_offset = (bx * gridDim.y * NQ * d) + (by * NQ * d);  // gridDim.y = nh
+    int q_offset = bx * q_stride.b + by * q_stride.h;  // gridDim.y = nh
+    int kv_offset = bx * kv_stride.b + by * kv_stride.h;
 
     // Define SRAM for Q,K,V,S
     extern __shared__ float sram[];
@@ -47,7 +53,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
         if (q_idx < NQ && ty < Br) {
 #pragma unroll
             for (int k = 0; k < 8; k++) {
-                Qi[ty * d + tx * 8 + k] = static_cast<float>(Q[q_offset + q_idx * d + tx * 8 + k]);
+                Qi[ty * d + tx * 8 + k] = static_cast<float>(Q[q_offset + q_idx * q_stride.n + tx * 8 + k]);
                 Oi[ty * d + tx * 8 + k] = 0.0f;
             }
         }
@@ -60,8 +66,8 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
             if (kv_idx < NKV) {
 #pragma unroll
                 for (int k = 0; k < 8; k++) {
-                    Kj[ty * d + tx * 8 + k] = static_cast<float>(K[kv_offset + kv_idx * d + tx * 8 + k]);
-                    Vj[ty * d + tx * 8 + k] = static_cast<float>(V[kv_offset + kv_idx * d + tx * 8 + k]);
+                    Kj[ty * d + tx * 8 + k] = static_cast<float>(K[kv_offset + kv_idx * kv_stride.n + tx * 8 + k]);
+                    Vj[ty * d + tx * 8 + k] = static_cast<float>(V[kv_offset + kv_idx * kv_stride.n + tx * 8 + k]);
                 }
             } else {
 #pragma unroll
@@ -136,7 +142,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
             // Write Oi to O in HBM
 #pragma unroll
             for (int k = 0; k < 8; k++) {
-                O[q_offset + q_idx * d + tx * 8 + k] = static_cast<c10::Half>((1 / l_local) * Oi[ty * d + tx * 8 + k]);
+                O[o_offset + q_idx * d + tx * 8 + k] = static_cast<c10::Half>((1 / l_local) * Oi[ty * d + tx * 8 + k]);
             }
         }
     }
@@ -148,9 +154,10 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     const int NQ = Q.size(2); const int d = Q.size(3);
     const int NKV = K.size(2);
 
-    Q = Q.contiguous();
-    K = K.contiguous();
-    V = V.contiguous();
+    TensorStrides q_stride = {Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3)};
+    TensorStrides kv_stride = {K.stride(0), K.stride(1), K.stride(2), K.stride(3)};
+    TORCH_CHECK(kv_stride.d == 1, "kv_stride in head_dim must be 1");
+    TORCH_CHECK(q_stride.d == 1, "q_stride in head_dim must be 1");
 
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
@@ -165,7 +172,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
 
 
     // Initialize O to HBM
-    auto O = torch::zeros_like(Q);
+    auto O = torch::zeros({B, nh, NQ, d}, Q.options());
 
     dim3 grid_dim(B, nh);  // batch_size x num_heads
     dim3 block_dim(16, Bc);  // Bc threads per block
@@ -188,7 +195,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     forward_kernel<<<grid_dim, block_dim, sram_size>>>(
         Q.data_ptr<c10::Half>(), K.data_ptr<c10::Half>(), V.data_ptr<c10::Half>(),
         NQ, NKV, d, Tc, Tr, Bc, Br, softmax_scale,
-        O.data_ptr<c10::Half>(), mask_ptr
+        O.data_ptr<c10::Half>(), mask_ptr, q_stride, kv_stride
     );
     return O;
 }
