@@ -20,6 +20,7 @@ import os
 if (os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true' or
     os.getenv('USE_FLASH_V1', 'false').lower() == 'true' or
     os.getenv('USE_FLASH_V2', 'false').lower() == 'true' or
+    os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true' or
     os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true'):
     import minimal_attn
 
@@ -260,6 +261,7 @@ class Attention(nn.Module):
         self.use_flash_attn_v1 = os.getenv('USE_FLASH_V1', 'false').lower() == 'true'
         self.use_flash_attn_v2 = os.getenv('USE_FLASH_V2', 'false').lower() == 'true'
         self.use_flash_decode_minimal = os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true'
+        self.use_flash_attn_minimal_v2 = os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true'
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
         self.total_duration_ms = 0.0
@@ -339,6 +341,14 @@ class Attention(nn.Module):
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
                 output = minimal_attn.forward(xq, keys, values, empty_mask)
             method_name = "flash-attn-v1"
+# NOTE: impl of flash attn v2 minimal
+        elif self.use_flash_attn_minimal_v2:
+            if mask is not None:
+                output = minimal_attn.forward(xq, keys, values, mask)
+            else:
+                empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
+                output = minimal_attn.forward(xq, keys, values, empty_mask)
+            method_name = "flash-attn-minimal-v2"
 # NOTE: impl of flash attn v2
         elif self.use_flash_attn_v2:
             if mask is not None:

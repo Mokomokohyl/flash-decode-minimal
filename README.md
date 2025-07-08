@@ -13,8 +13,13 @@ Update the `LLAMA_CHAT_MODEL_PATH` to your Llama-7B-chat model path in `Makefile
 - `make ref`: Runs the original pytorch llama-7b chat completion.
 - `make bench-minimal`: Runs flash attention minimal kernel from https://github.com/tspeterkim/flash-attention-minimal. Only revised the `Bc` and `Br` calculation and add mask for prefill. (kernels/flash_attn_minimal.cu)
 - `make bench-v1`: Runs a slightly optimized Flash Attention v1 kernel based on flash-attention-minimal (simply add head_dim parallelism, each (ty, tx) handles [1, vec_size](vec_size = 8) elements). (kernels/flash_attn_v1.cu)
-- `make bench-v2`: Runs my implementation of Flash Attention V2. (kernels/flash_attn_v2.cu)
-- `make bench-fdm`: Runs flash-decode-minimal kernel, based on https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/attention/decode.cuh (kernels/flash_decode_minimal.cu)
+- `make bench-minimal-v2`: Runs my implementation of Flash Attention V2 of flash-attention-minimal style. (kernels/flash_attn_minimal_v2.cu)
+- `make bench-v2`: Runs my implementation of Flash Attention V2. Add double buffer pipeline. (kernels/flash_attn_v2.cu)
+- `make bench-fdm`: Runs flash-decode-minimal kernel, referring to https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/attention/decode.cuh (kernels/flash_decode_minimal.cu)
+
+The terminal outputs are redirected to logs/bench_*.log.
+
+Replace `bench` with `debug` will compile kernels with `-DDEBUG` and output some debug messages in the logs.
 
 ## Notes
 
