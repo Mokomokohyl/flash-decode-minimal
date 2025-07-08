@@ -17,13 +17,18 @@ from torch import nn
 import os
 
 # Added kernels for optimization
-if (os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true' or
-    os.getenv('USE_FLASH_V1', 'false').lower() == 'true' or
-    os.getenv('USE_FLASH_V2', 'false').lower() == 'true' or
-    os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true' or
-    os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true' or 
-    os.getenv('USE_FLASH_DECODE_FIXKV', 'false').lower() == 'true'):
-    import minimal_attn
+if (os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true'):
+    from .kernels import minimal
+if os.getenv('USE_FLASH_V1', 'false').lower() == 'true':
+    from .kernels import v1
+if os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true':
+    from .kernels import minimal_v2
+if os.getenv('USE_FLASH_V2', 'false').lower() == 'true':
+    from .kernels import v2
+if os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true':
+    from .kernels import fdm
+if os.getenv('USE_FLASH_DECODE_FIXKV', 'false').lower() == 'true':
+    from .kernels import fdm_fixkv
 
 @dataclass
 class ModelArgs:
@@ -326,50 +331,50 @@ class Attention(nn.Module):
 # NOTE: impl from flash-attention-minimal
         if self.use_flash_attention_minimal:
             if mask is not None:
-                output = minimal_attn.forward(xq, keys, values, mask)
+                output = minimal.forward(xq, keys, values, mask)
             else:
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-                output = minimal_attn.forward(xq, keys, values, empty_mask)
+                output = minimal.forward(xq, keys, values, empty_mask)
             method_name = "flash-attention-minimal"
 # NOTE: impl of flash-decode-minimal
         elif self.use_flash_decode_minimal:
             if mask is not None:
-                output = minimal_attn.forward(xq, keys, values, mask)
+                output = fdm.forward(xq, keys, values, mask)
             else:
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-                output = minimal_attn.forward(xq, keys, values, empty_mask)
+                output = fdm.forward(xq, keys, values, empty_mask)
             method_name = "flash-decode-minimal"
 # NOTE: impl of flash-decode with fixed length kv cache
         elif self.use_flash_decode_fixkv:
             if mask is not None:
-                output = minimal_attn.forward(xq, keys, values, mask)
+                output = fdm_fixkv.forward(xq, keys, values, mask)
             else:
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-                output = minimal_attn.forward(xq, keys, values, empty_mask)
+                output = fdm_fixkv.forward(xq, keys, values, empty_mask)
             method_name = "flash-decode-minimal-fix-kv-length"
 # NOTE: impl based on minimal. flash attention v1
         elif self.use_flash_attn_v1:
             if mask is not None:
-                output = minimal_attn.forward(xq, keys, values, mask)
+                output = v1.forward(xq, keys, values, mask)
             else:
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-                output = minimal_attn.forward(xq, keys, values, empty_mask)
+                output = v1.forward(xq, keys, values, empty_mask)
             method_name = "flash-attn-v1"
 # NOTE: impl of flash attn v2 minimal
         elif self.use_flash_attn_minimal_v2:
             if mask is not None:
-                output = minimal_attn.forward(xq, keys, values, mask)
+                output = minimal_v2.forward(xq, keys, values, mask)
             else:
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-                output = minimal_attn.forward(xq, keys, values, empty_mask)
+                output = minimal_v2.forward(xq, keys, values, empty_mask)
             method_name = "flash-attn-minimal-v2"
 # NOTE: impl of flash attn v2
         elif self.use_flash_attn_v2:
             if mask is not None:
-                output = minimal_attn.forward(xq, keys, values, mask)
+                output = v2.forward(xq, keys, values, mask)
             else:
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-                output = minimal_attn.forward(xq, keys, values, empty_mask)
+                output = v2.forward(xq, keys, values, empty_mask)
             method_name = "flash-attn-v2"
 # NOTE: Original impl
         else:

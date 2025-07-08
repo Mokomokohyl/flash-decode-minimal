@@ -1,4 +1,4 @@
-LLAMA_CHAT_MODEL_PATH ?= /path/to/llama/model # revise to run chat completion and bench
+LLAMA_CHAT_MODEL_PATH ?= /path/to/model # revise to run chat completion and bench
 MAX_SEQ_LEN = 1024
 
 VERSION ?= v2
@@ -7,29 +7,27 @@ MODE ?= bench
 LOG_FILE_NAME ?= $(MODE)_$(VERSION)
 LOG_PATH = ./logs/$(LOG_FILE_NAME).log
 
+ENV_PREFIX = MODE=$(MODE)
+
 ifeq ($(VERSION),v1)
-	ENV_PREFIX = USE_FLASH_V1=true
+	ENV_PREFIX += USE_FLASH_V1=true
 else ifeq ($(VERSION),v2)
-	ENV_PREFIX = USE_FLASH_V2=true
+	ENV_PREFIX += USE_FLASH_V2=true
 else ifeq ($(VERSION),minimal)
-	ENV_PREFIX = USE_FLASH_MINIMAL=true
+	ENV_PREFIX += USE_FLASH_MINIMAL=true
 else ifeq ($(VERSION),minimal_v2)
-	ENV_PREFIX = USE_FLASH_MINIMAL_V2=true
+	ENV_PREFIX += USE_FLASH_MINIMAL_V2=true
 else ifeq ($(VERSION),fdm)
-	ENV_PREFIX = USE_FLASH_DECODE_MINIMAL=true
+	ENV_PREFIX += USE_FLASH_DECODE_MINIMAL=true
 else ifeq ($(VERSION),fdm_fixkv)
-	ENV_PREFIX = USE_FLASH_DECODE_FIXKV=true
+	ENV_PREFIX += USE_FLASH_DECODE_FIXKV=true
 else ifeq ($(VERSION),ref)
 	ENV_PREFIX = 
 else
-	$(error Unsupported VERSION: $(VERSION). Use v1, v2, minimal, or ref)
+	$(error Unsupported VERSION: $(VERSION). Use v1, v2, minimal, minimal-v2, fdm, fdm-fixkv or ref)
 endif
 
-ifeq ($(MODE),debug)
-	COMPILE_SCRIPT = compile_debug_kernels.py
-else
-	COMPILE_SCRIPT = compile_kernels.py
-endif
+COMPILE_SCRIPT = compile_kernels.py
 
 BENCH_CMD = torchrun --nproc_per_node 1 bench.py \
 	--ckpt_dir $(LLAMA_CHAT_MODEL_PATH) \
@@ -37,12 +35,17 @@ BENCH_CMD = torchrun --nproc_per_node 1 bench.py \
 	--max_seq_len $(MAX_SEQ_LEN) --max_batch_size 6
 
 run:
-ifeq ($(VERSION),ref)
-	$(BENCH_CMD) > $(LOG_PATH) 2>&1
-else
+ifeq ($(MODE), debug)
 	$(ENV_PREFIX) python3 $(COMPILE_SCRIPT) build_ext --inplace > $(LOG_PATH) 2>&1 && \
 	$(ENV_PREFIX) $(BENCH_CMD) >> $(LOG_PATH) 2>&1
+else
+	$(ENV_PREFIX) $(BENCH_CMD) > $(LOG_PATH) 2>&1
 endif
+
+KERNELS ?= all
+compile:
+	mkdir -p llama/kernels && touch llama/kernels/__init__.py
+	KERNELS=$(KERNELS) python3 $(COMPILE_SCRIPT) build_ext --inplace
 
 bench:
 	$(MAKE) run MODE=bench VERSION=$(VERSION)
