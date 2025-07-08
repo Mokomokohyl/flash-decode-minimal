@@ -1,6 +1,6 @@
 # flash-decode-minimal
 The repo records my experience learning flash attention/flash decode.
-Currently the kernels only support llama-7b-chat(head_dim=128, MHA) model inference.
+Currently the kernels only support llama-2-7b-chat(head_dim=128, MHA) model inference.
 
 ## Environment setup
 - CUDA 12.6
@@ -9,7 +9,7 @@ Currently the kernels only support llama-7b-chat(head_dim=128, MHA) model infere
 pip install -e .
 ```
 ## Build and run
-Update the `LLAMA_CHAT_MODEL_PATH` to your Llama-7B-chat model path in `Makefile` or pass it as a command-line argument (e.g. `make bench LLAMA_MODEL_PATH=/path/to/model`).
+Update the `LLAMA_CHAT_MODEL_PATH` to your Llama-2-7B-chat model path in `Makefile` or pass it as a command-line argument (e.g. `make bench LLAMA_MODEL_PATH=/path/to/model`).
 Type `make compile` to compile all kernels. It will take 2~3 minutes to generate llama/kernels/*.so for llama/model.py to import and call.
 - `make ref`: Run the original pytorch llama-7b chat completion.
 - `make bench-minimal`: Runs flash attention minimal kernel from https://github.com/tspeterkim/flash-attention-minimal. Only revised the `Bc` and `Br` calculation and add mask for prefill. (kernels/flash_attn_minimal.cu)

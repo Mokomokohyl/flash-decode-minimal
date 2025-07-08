@@ -16,19 +16,13 @@ from fairscale.nn.model_parallel.layers import (
 from torch import nn
 import os
 
-# Added kernels for optimization
-if (os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true'):
-    from .kernels import minimal
-if os.getenv('USE_FLASH_V1', 'false').lower() == 'true':
-    from .kernels import v1
-if os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true':
-    from .kernels import minimal_v2
-if os.getenv('USE_FLASH_V2', 'false').lower() == 'true':
-    from .kernels import v2
-if os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true':
-    from .kernels import fdm
-if os.getenv('USE_FLASH_DECODE_FIXKV', 'false').lower() == 'true':
-    from .kernels import fdm_fixkv
+# import custom kernels
+from .kernels import minimal
+from .kernels import v1
+from .kernels import minimal_v2
+from .kernels import v2
+from .kernels import fdm
+from .kernels import fdm_fixkv
 
 @dataclass
 class ModelArgs:
@@ -264,7 +258,6 @@ class Attention(nn.Module):
             )
         ).cuda()
 
-        # 
         def original_attention(q, k, v, mask):
             scores = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
             if mask is not None:
@@ -272,6 +265,7 @@ class Attention(nn.Module):
             scores = F.softmax(scores.float(), dim=-1).type_as(q)
             return torch.matmul(scores, v)
 
+        # Kernel choice
         kernel_map = {
             "USE_FLASH_DECODE_FIXKV": (fdm_fixkv.forward, "flash-decode-minimal-fix-kv-length"),
             "USE_FLASH_DECODE_MINIMAL": (fdm.forward, "flash-decode-minimal"),
@@ -286,7 +280,7 @@ class Attention(nn.Module):
             if os.getenv(env_var, 'false').lower() == 'true':
                 self.attention_kernel = kernel_fn
                 self.method_name = name
-                break # 找到第一个就停止
+                break
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
         self.total_duration_ms = 0.0
@@ -344,12 +338,12 @@ class Attention(nn.Module):
         self.start_event.record()
         if self.method_name != "Original" and mask is None:
             mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-        output = self.attention_kernel(xq, keys, values, effective_mask)
+        output = self.attention_kernel(xq, keys, values, mask)
         self.end_event.record()
         torch.cuda.synchronize()
         
         duration_ms = self.start_event.elapsed_time(self.end_event)
-        print(f"[{method_name}] Attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
+        print(f"[{self.method_name}] Attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
         self.total_duration_ms += duration_ms
 
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)

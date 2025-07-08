@@ -36,9 +36,11 @@ BENCH_CMD = torchrun --nproc_per_node 1 bench.py \
 
 run:
 ifeq ($(MODE), debug)
+	mkdir -p logs/
 	$(ENV_PREFIX) python3 $(COMPILE_SCRIPT) build_ext --inplace > $(LOG_PATH) 2>&1 && \
 	$(ENV_PREFIX) $(BENCH_CMD) >> $(LOG_PATH) 2>&1
 else
+	mkdir -p logs/
 	$(ENV_PREFIX) $(BENCH_CMD) > $(LOG_PATH) 2>&1
 endif
 
@@ -58,6 +60,9 @@ clean:
 	@rm -rf build/ dist/ *.egg-info
 	@rm -rf llama/kernels/* 
 	@find . -name "__pycache__" -type d -exec rm -r {} +
+
+clean_logs:
+	@rm -rf logs/
 
 bench-v1: ; $(MAKE) bench VERSION=v1
 bench-v2: ; $(MAKE) bench VERSION=v2
