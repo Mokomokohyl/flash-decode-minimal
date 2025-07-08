@@ -114,3 +114,26 @@ if os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true':
             }
         }
     )
+
+if os.getenv('USE_FLASH_DECODE_FIX_KV', 'false').lower() == 'true':
+    setup(
+        name='minimal_attn',
+        ext_modules=[
+            CUDAExtension(
+                name='minimal_attn',
+                sources=['kernels/bind_fix_len_kv.cpp', 'kernels/flash_decode_fixed_len_kv_cache.cu'],
+                extra_compile_args={
+                    'cxx': ['-O2'],
+                    'nvcc': ['-O2', '-arch=sm_80', '-Xptxas', '-v', '-DDEBUG']
+                }
+            ),
+        ],
+        cmdclass={
+            'build_ext': BuildExtension.with_options(no_python_abi_suffix=True)
+        },
+        options={
+            'build_ext': {
+                'build_lib': os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama")
+            }
+        }
+    )

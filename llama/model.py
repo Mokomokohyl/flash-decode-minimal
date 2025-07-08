@@ -21,7 +21,8 @@ if (os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true' or
     os.getenv('USE_FLASH_V1', 'false').lower() == 'true' or
     os.getenv('USE_FLASH_V2', 'false').lower() == 'true' or
     os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true' or
-    os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true'):
+    os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true' or 
+    os.getenv('USE_FLASH_DECODE_FIXKV', 'false').lower() == 'true'):
     import minimal_attn
 
 @dataclass
@@ -257,11 +258,15 @@ class Attention(nn.Module):
                 self.head_dim,
             )
         ).cuda()
+
+        # Added for introduce custom Attention kernel
         self.use_flash_attention_minimal = os.getenv('USE_FLASH_MINIMAL', 'false').lower() == 'true'
         self.use_flash_attn_v1 = os.getenv('USE_FLASH_V1', 'false').lower() == 'true'
+        self.use_flash_attn_minimal_v2 = os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true'
         self.use_flash_attn_v2 = os.getenv('USE_FLASH_V2', 'false').lower() == 'true'
         self.use_flash_decode_minimal = os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true'
-        self.use_flash_attn_minimal_v2 = os.getenv('USE_FLASH_MINIMAL_V2', 'false').lower() == 'true'
+        self.use_flash_decode_fixkv = os.getenv('USE_FLASH_DECODE_FIXKV', 'false').lower() == 'true'
+        self.kv_stride_h = args.max_seq_len
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
         self.total_duration_ms = 0.0
@@ -326,6 +331,7 @@ class Attention(nn.Module):
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
                 output = minimal_attn.forward(xq, keys, values, empty_mask)
             method_name = "flash-attention-minimal"
+# NOTE: impl of flash-decode-minimal
         elif self.use_flash_decode_minimal:
             if mask is not None:
                 output = minimal_attn.forward(xq, keys, values, mask)
@@ -333,6 +339,14 @@ class Attention(nn.Module):
                 empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
                 output = minimal_attn.forward(xq, keys, values, empty_mask)
             method_name = "flash-decode-minimal"
+# NOTE: impl of flash-decode with fixed length kv cache
+        elif self.use_flash_decode_fixkv:
+            if mask is not None:
+                output = minimal_attn.forward(xq, keys, values, mask, self.kv_stride_h)
+            else:
+                empty_mask = torch.empty(0, dtype=torch.float16, device=xq.device)
+                output = minimal_attn.forward(xq, keys, values, empty_mask, self.kv_stride_h)
+            method_name = "flash-decode-minimal-fix-kv-length"
 # NOTE: impl based on minimal. flash attention v1
         elif self.use_flash_attn_v1:
             if mask is not None:

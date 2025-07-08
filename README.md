@@ -41,7 +41,13 @@ class Attention(nn.module):
             output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
     # ...
 ```
-The `keys` and `values` tensors are slices of a pre-allocated fixed-length KV cache, making them non-contiguous in memory. I had to call K.contiguous() and V.contiguous() in the kernels, which introduces non-negligible overhead.
+The `keys` and `values` tensors are slices of a pre-allocated fixed-length KV cache, making them non-contiguous in memory. I had to call K.contiguous() and V.contiguous() in the kernels, which introduces non-negligible overhead. To verify this, you can run
+```bash
+git checkout profile_contiguous
+make bench-contiguous LLAMA_CHAT_MODEL_PATH=/path/to/model
+```
+and the result will be in /logs/profile_contiguous.log
+
 
 ### TODOs
 

@@ -487,9 +487,40 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     const int NQ = Q.size(2); const int d = Q.size(3);
     const int NKV = K.size(2);
 
+    cudaEvent_t start, stop;
+    float milliseconds = 0;
+    float total = 0;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop); 
+
+    cudaEventRecord(start);
     Q = Q.contiguous();
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("[Profile] Q.contiguous() time: %f ms\n", milliseconds);
+    total += milliseconds;
+
+    cudaEventRecord(start);
     K = K.contiguous();
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("[Profile] K.contiguous() time: %f ms\n", milliseconds);
+    total += milliseconds;
+
+    cudaEventRecord(start);
     V = V.contiguous();
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("[Profile] V.contiguous() time: %f ms\n", milliseconds);
+    total += milliseconds;
+
+    printf("[Profile] total .contiguous() time: %f ms\n", total);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     int max_sram_size;
     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
