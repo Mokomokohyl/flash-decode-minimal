@@ -173,7 +173,7 @@ void forward_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
                 sum *= softmax_scale;
                 if (pos_valid) {
                     if (mask != nullptr) {
-                        int mask_idx = q_idx * NKV + consumer_kv_idx * Bc + y;
+                        int mask_idx = q_idx * NKV + consumer_kv_idx + y;
                         S[ty * Bc + y] = sum + static_cast<float>(mask[mask_idx]);
                     } else {
                         S[ty * Bc + y] = sum;

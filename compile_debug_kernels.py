@@ -115,7 +115,7 @@ if os.getenv('USE_FLASH_DECODE_MINIMAL', 'false').lower() == 'true':
         }
     )
 
-if os.getenv('USE_FLASH_DECODE_FIX_KV', 'false').lower() == 'true':
+if os.getenv('USE_FLASH_DECODE_FIXKV', 'false').lower() == 'true':
     setup(
         name='minimal_attn',
         ext_modules=[
