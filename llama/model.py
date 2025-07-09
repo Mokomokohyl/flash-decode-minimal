@@ -289,7 +289,7 @@ class Attention(nn.Module):
         self.start_event = torch.cuda.Event(enable_timing=True)
         self.end_event = torch.cuda.Event(enable_timing=True)
         self.total_duration_ms = 0.0
-        self.wordy = False # set to true will make it output time for every attention call, slows down overall generation.
+        self.wordy = False # set to true will make it output time for every attention call, slowing down overall generation.
 
     def forward(
         self,
@@ -352,7 +352,7 @@ class Attention(nn.Module):
         self.total_duration_ms += duration_ms
 
         if self.wordy:
-            print(f"[{method_name}] Attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
+            print(f"[{self.method_name}] Attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
 
         self.total_tokens_processed += xq.size(0) * xq.size(2) # bsz * seqlen
         if xq.size(2) > 1: # Prefill
