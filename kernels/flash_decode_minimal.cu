@@ -55,6 +55,7 @@ __device__ __forceinline__ void cp_async_wait_group() {
 }
 
 /***** vec_t type for accelerating dtype cast and load to registers *****/
+// Currently only support vec_size = 8
 template <size_t vec_size>
 struct float_vec_t {
     union {
