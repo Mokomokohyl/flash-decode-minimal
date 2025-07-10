@@ -76,7 +76,7 @@ struct float_vec_t {
         }
     }
 
-    __device__ __forceinline__ void load_from_float8(float* smem_ptr) {
+    __device__ __forceinline__ void load_from_float8(const float* smem_ptr) {
         static_assert(vec_size == 8, "vec_size must be 8 for the method");
         i4_0 = *reinterpret_cast<const int4*>(&smem_ptr[0]);
         i4_1 = *reinterpret_cast<const int4*>(&smem_ptr[4]);
@@ -109,7 +109,7 @@ struct state_t {
 
     // init st values
     __device__ __forceinline__ void init() {
-        l = 1.0f;
+        l = 0.0f;
         m = -INFINITY;
 #pragma unroll
         for (int i = 0; i < vec_size; i++) {
@@ -137,7 +137,7 @@ struct state_t {
 };
 
 struct TensorStrides {
-    long b, h, n, d; // batch, head, sequence, dimension
+    long b, h, n, d; // batch, head, sequence, dimension/
 };
 
 // same as flash_attn_v2.cu. removed mask_ptr check
@@ -306,19 +306,16 @@ void prefill_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, 
 template <size_t vec_size, size_t tile_size_per_bdx, size_t num_stages_smem, const bool split_kv>
 __global__
 void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, const int NQ, const int NKV, const int d,
-                    const int Tc, const int Bc, const float softmax_scale, const uint32_t kv_chunk_size
-                    c10::Half* O, const int bdx, const int bdy, TensorStrides q_stride, TensorStrides kv_stride) {
+                    const int Tc, const int Bc, const float softmax_scale, const uint32_t kv_chunk_size, const uint32_t num_kv_chunks,
+                    c10::Half* O, const int bdx, const int bdy, TensorStrides q_stride, TensorStrides kv_stride, float* tmp_O, float* tmp_states_lm) {
     int tx = threadIdx.x; // head_dim
     int ty = threadIdx.y; // in decode kernel, use ty to devide Bc into bdy * tile_size_per_bdx.
     int bx = blockIdx.x; int by = blockIdx.y;  // batch and head index
+    int batch_idx = bx / num_kv_chunks; int kv_chunk_idx = bx % num_kv_chunks;
 
     // Offset into Q,K,V,O,l,m - different for each batch and head
-    if constexpr (split_kv) {
-
-    } else {
-        int q_offset = (bx * q_stride.b) + (by * q_stride.h);  // gridDim.y = nh
-        int kv_offset = (bx * kv_stride.b) + (by * kv_stride.h);
-    }
+    int q_offset = (batch_idx * q_stride.b) + (by * q_stride.h);
+    int kv_offset = (batch_idx * kv_stride.b) + (by * kv_stride.h) + (kv_chunk_idx * kv_chunk_size * kv_stride.n);
 
     // Register for q, k, v vec
     float_vec_t<vec_size> q_vec, k_vec, v_vec;
@@ -334,6 +331,12 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
     q_vec.load_from_half8(Q + q_offset + tx * vec_size);
     st.init();
 
+    int total_iters;
+    if constexpr (split_kv) {
+        total_iters = ceil(kv_chunk_size / (float)Bc);
+    } else {
+        total_iters = Tc;
+    }
     int stage_idx = 0;
     int producer_kv_idx = 0;
     int consumer_kv_idx = 0;
@@ -347,7 +350,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
                 Kj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size, 
                 K + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
-                cur_kv_token < NKV
+                cur_kv_token < kv_chunk_size
             );
         }
         cp_async_commit_group();
@@ -356,7 +359,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             cp_async_pred_load_128b<true>(
                 Vj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size,
                 V + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
-                cur_kv_token < NKV
+                cur_kv_token < kv_chunk_size
             );
         }
         cp_async_commit_group();
@@ -366,7 +369,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
 
     // pipeline
 #pragma unroll 2
-    for (int j = 0; j < Tc; j++) {
+    for (int j = 0; j < total_iters; j++) {
         float m_prev = st.m;
         float sum = 0.0f;
         cp_async_wait_group<2 * num_stages_smem - 1>(); // wait for last k load
@@ -376,7 +379,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
 #pragma unroll
         for (int y = 0; y < tile_size_per_bdx; y++) {
             sum = 0;
-            bool pos_valid = ((consumer_kv_idx + ty * tile_size_per_bdx + y) < NKV);
+            bool pos_valid = ((consumer_kv_idx + ty * tile_size_per_bdx + y) < kv_chunk_size);
             if (pos_valid) {
                 k_vec.load_from_half8(Kj + stage_idx * Bc * d + (ty * tile_size_per_bdx + y) * d + tx * vec_size);
 #pragma unroll
@@ -404,7 +407,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
                 Kj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size,
                 K + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
-                cur_kv_token < NKV
+                cur_kv_token < kv_chunk_size
             );
         }
         cp_async_commit_group();
@@ -413,7 +416,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
         float row_l = 0.0f; // row_l = rowsum(P)
 #pragma unroll
         for (int y = 0; y < tile_size_per_bdx; y++) {
-            if ((consumer_kv_idx + ty * tile_size_per_bdx + y) < NKV) {
+            if ((consumer_kv_idx + ty * tile_size_per_bdx + y) < kv_chunk_size) {
                 S[ty * tile_size_per_bdx + y] = ptx_exp2(S[ty * tile_size_per_bdx + y] - st.m);
                 row_l += S[ty * tile_size_per_bdx + y];
             }
@@ -450,7 +453,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             cp_async_pred_load_128b<true>(
                 Vj + stage_idx * Bc * d + (ty * tile_size_per_bdx + y) * d + tx * vec_size,
                 V + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
-                cur_kv_token < NKV
+                cur_kv_token < kv_chunk_size
             );
         }
         cp_async_commit_group();
@@ -485,11 +488,45 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
         }
     }
 
-    // final scale
-    st.normalize();
-    // Write Oi to O in HBM
-    st.o_vec.store_to_half(O + ((bx * gridDim.y * NQ * d) + (by * NQ * d)) + tx * vec_size);
+    if constexpr (split_kv) {
+        // Store all chunks tmp O and states into HBM
+        st.o_vec.store_to_float(tmp_O + (batch_idx * gridDim.y * num_kv_chunks * d) + by * num_kv_chunks * d + kv_chunk_idx * d + tx * vec_size);
+        tmp_states_lm[batch_idx * gridDim.y * num_kv_chunks * 2 + by * num_kv_chunks * 2 + kv_chunk_idx * 2] = st.l;
+        tmp_states_lm[batch_idx * gridDim.y * num_kv_chunks * 2 + by * num_kv_chunks * 2 + kv_chunk_idx * 2 + 1] = st.m;
 
+    } else {
+        // final scale
+        st.normalize();
+        // Write Oi to O in HBM
+        st.o_vec.store_to_half(O + ((bx * gridDim.y * NQ * d) + (by * NQ * d)) + tx * vec_size);
+    }
+
+}
+
+template <size_t vec_size>
+__global__ void MergeStates(const uint32_t num_kv_chunks, const int d, const float* tmp_O, const float* tmp_states_lm, c10::Half* O) {
+    int batch_idx = blockIdx.x;
+    int by = blockIdx.y;
+    int tx = threadIdx.x;
+
+    float cur_l, cur_m;
+    float_vec_t<vec_size> cur_o_vec;
+    state_t<vec_size> st;
+    int tmp_states_lm_idx_base = (batch_idx * gridDim.y + by) * num_kv_chunks * 2;
+    int tmp_O_idx_base = (batch_idx * gridDim.y + by) * num_kv_chunks * d + tx * vec_size;
+    st.l = tmp_states_lm[tmp_states_lm_idx_base];
+    st.m = tmp_states_lm[tmp_states_lm_idx_base + 1];
+    st.o_vec.load_from_float8(tmp_O + tmp_O_idx_base);
+    for (int i = 1; i < num_kv_chunks; i++) {
+        cur_m = tmp_states_lm[tmp_states_lm_idx_base + i * 2 + 1];
+        if (cur_m != -INFINITY) {
+            cur_l = tmp_states_lm[tmp_states_lm_idx_base + i * 2];
+            cur_o_vec.load_from_float8(tmp_O + tmp_O_idx_base + i * d);
+            st.merge(cur_o_vec, cur_l, cur_m);
+        }
+    }
+    st.normalize();
+    st.o_vec.store_to_half(O + ((batch_idx * gridDim.y * d) + (by * d)) + tx * vec_size);
 }
 
 torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor mask) {
@@ -515,28 +552,13 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
 
     const int Bc = (NQ == 1) ? bdy * tile_size_per_bdx: ceil(M / (4 * d));
     const int Br = min(Bc, d);
-    const int sram_size = (NQ == 1) ? 8 * d * sizeof(float) + 2 * num_stages_smem * Bc * d * sizeof(c10::Half) + Bc * sizeof(float)
-    : (Br * d * sizeof(float)) + (2 * num_stages_smem * Bc * d * sizeof(c10::Half)) + (Bc * Br * sizeof(float));
     const int Tr = ceil((float) NQ / Br);
     const int Tc = ceil((float) NKV / Bc);
     const float softmax_scale = log2e * 1.0 / sqrt(d);
     const size_t vec_size = 8;
 
-    // Set sram_size, otherwise the launch would fail.
-    cudaFuncSetAttribute(
-        (const void*)decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        sram_size
-    );
-    cudaFuncSetAttribute(
-        (const void*)prefill_kernel<vec_size>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        sram_size
-    );
-
     // Initialize O to HBM
     auto O = torch::zeros({B, nh, NQ, d}, Q.options());
-
 
     const bool has_mask = mask.numel() > 0;
     c10::Half* mask_ptr = has_mask ? mask.data_ptr<c10::Half>() : nullptr;
@@ -550,10 +572,16 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     printf("B: %d, nh: %d, NQ: %d, d: %d, NKV: %d\n", B, nh, NQ, d, NKV);
     printf("Default sram size: %d\n", max_sram_size);
     printf("Bc: %d, Br: %d, NQ: %d, NKV: %d, Tr: %d, Tc: %d\n", Bc, Br, NQ, NKV, Tr, Tc);
-    printf("Required Sram size: %d\n", sram_size);
 #endif
 
     if (mask_ptr != nullptr) {
+        // prefill
+        const int sram_size = (Br * d * sizeof(float)) + (2 * num_stages_smem * Bc * d * sizeof(c10::Half)) + (Bc * Br * sizeof(float));
+        cudaFuncSetAttribute(
+            (const void*)prefill_kernel<vec_size>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            sram_size
+        );
         dim3 grid_dim(B, nh);  // batch_size x num_heads
         dim3 block_dim(16, Bc);  // Bc x 16 threads per block
         prefill_kernel<vec_size><<<grid_dim, block_dim, sram_size>>>(
@@ -562,9 +590,11 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
             O.data_ptr<c10::Half>(), mask_ptr, num_stages_smem, q_stride, kv_stride
         );
     } else {
+        // decode
+        const int sram_size = 8 * d * sizeof(float) + 2 * num_stages_smem * Bc * d * sizeof(c10::Half) + Bc * sizeof(float);
         // Determine whether to use partition KV kernel
-        auto kernel = decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem>;
-        uint32_t dev_id = 0, num_blocks_per_sm = 0, num_sm = 0, max_grid_size = 0;
+        auto kernel = decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem, false>;
+        int dev_id = 0, num_blocks_per_sm = 0, num_sm = 0, max_grid_size = 0;
         uint32_t num_threads = 128;
         cudaGetDevice(&dev_id);
         cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id);
@@ -578,30 +608,57 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
             // Not to use partition KV kernel
             const bool split_kv = false;
             uint32_t kv_chunk_size = NKV;
+            uint32_t num_kv_chunks = 1;
             
+            // Set sram size
+            cudaFuncSetAttribute(
+                (const void*)decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem, split_kv>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                sram_size
+            );
+#ifdef DEBUG
+            printf("Required Sram size: %d\n", sram_size);
+            printf("kv_chunk_size: %d, num_kv_chunks: %d\n", kv_chunk_size, num_kv_chunks);
+#endif
             dim3 grid_dim(B, nh);  // batch_size x num_heads
             dim3 block_dim(bdx, bdy);  // 128 threads per block according to flashinfer
             decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem, split_kv><<<grid_dim, block_dim, sram_size>>>(
                 Q.data_ptr<c10::Half>(), K.data_ptr<c10::Half>(), V.data_ptr<c10::Half>(),
-                NQ, NKV, d, Tc, Bc, kv_chunk_size, softmax_scale,
-                O.data_ptr<c10::Half>(), bdx, bdy, q_stride, kv_stride
+                NQ, NKV, d, Tc, Bc, softmax_scale, kv_chunk_size, num_kv_chunks,
+                O.data_ptr<c10::Half>(), bdx, bdy, q_stride, kv_stride, nullptr, nullptr
             );
         } else {
             // Use partition KV kernel
             const bool split_kv = true;
+            cudaFuncSetAttribute(
+                (const void*)decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem, split_kv>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                sram_size
+            );
             // determine kv_chunk_size and num_chunks
             uint32_t max_num_kv_chunks = max_grid_size / nh;
-            uint32_t kv_chunk_size = max(ceil(NKV / (float)max_num_kv_chunks), 256);
-            uint32_t num_chunks = ceil(NKV / (float)kv_chunk_size);
+            uint32_t kv_chunk_size = max((int)ceil(NKV / (float)max_num_kv_chunks), 256);
+            uint32_t num_kv_chunks = ceil(NKV / (float)kv_chunk_size);
+#ifdef DEBUG
+            printf("Required Sram size: %d\n", sram_size);
+            printf("kv_chunk_size: %d, num_kv_chunks: %d\n", kv_chunk_size, num_kv_chunks);
+#endif
 
-            dim3 grid_dim(B * num_chunks, nh);  // "padded_batch_size" x num_heads
+            // Allocate device-side memory to save intermediate results of O and state_t
+            auto tmp_O = torch::zeros({B, nh, num_kv_chunks, d}, Q.options().dtype(torch::kFloat32));
+            auto tmp_states_lm = torch::zeros({B, nh, num_kv_chunks, 2}, Q.options().dtype(torch::kFloat32));
+
+            dim3 grid_dim(B * num_kv_chunks, nh);  // "padded_batch_size" x num_heads
             dim3 block_dim(bdx, bdy);  // 128 threads per block according to flashinfer
 
             decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem, split_kv><<<grid_dim, block_dim, sram_size>>>(
                 Q.data_ptr<c10::Half>(), K.data_ptr<c10::Half>(), V.data_ptr<c10::Half>(),
-                NQ, NKV, d, Tc, Bc, kv_chunk_size, softmax_scale,
-                O.data_ptr<c10::Half>(), bdx, bdy, q_stride, kv_stride
+                NQ, NKV, d, Tc, Bc, softmax_scale, kv_chunk_size, num_kv_chunks,
+                O.data_ptr<c10::Half>(), bdx, bdy, q_stride, kv_stride, tmp_O.data_ptr<float>(), tmp_states_lm.data_ptr<float>()
             );
+            dim3 merge_grid_dim(B, nh);
+            dim3 merge_block_dim(bdx);
+            MergeStates<vec_size><<<merge_grid_dim, merge_block_dim>>>(num_kv_chunks, d, tmp_O.data_ptr<float>(), tmp_states_lm.data_ptr<float>(), O.data_ptr<c10::Half>());
         }
     }
     return O;
