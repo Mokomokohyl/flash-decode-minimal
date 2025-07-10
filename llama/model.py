@@ -22,6 +22,7 @@ from .kernels import v1
 from .kernels import minimal_v2
 from .kernels import v2
 from .kernels import fdm
+from .kernels import fdm_splitkv
 
 @dataclass
 class ModelArgs:
@@ -271,6 +272,7 @@ class Attention(nn.Module):
             "USE_FLASH_MINIMAL_V2": (minimal_v2.forward, "flash-attn-minimal-v2"),
             "USE_FLASH_V1": (v1.forward, "flash-attn-v1"),
             "USE_FLASH_MINIMAL": (minimal.forward, "flash-attn-minimal"),
+            "USE_FDM_SPLIT_KV": (fdm_splitkv.forward, "flash-decode-minimal-split-kv")
         }
         self.attention_kernel = original_attention
         self.method_name = "Original"
