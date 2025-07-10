@@ -11,14 +11,19 @@ ENV_PREFIX = MODE=$(MODE)
 
 ifeq ($(VERSION),v1)
 	ENV_PREFIX += USE_FLASH_V1=true
+	KERNELS=v1
 else ifeq ($(VERSION),v2)
 	ENV_PREFIX += USE_FLASH_V2=true
+	KERNELS=v2
 else ifeq ($(VERSION),minimal)
 	ENV_PREFIX += USE_FLASH_MINIMAL=true
+	KERNELS=minimal
 else ifeq ($(VERSION),minimal_v2)
 	ENV_PREFIX += USE_FLASH_MINIMAL_V2=true
+	KERNELS=minimal_v2
 else ifeq ($(VERSION),fdm)
 	ENV_PREFIX += USE_FLASH_DECODE_MINIMAL=true
+	KERNELS=fdm
 else ifeq ($(VERSION),ref)
 	ENV_PREFIX = 
 else
@@ -35,7 +40,7 @@ BENCH_CMD = torchrun --nproc_per_node 1 bench.py \
 run:
 ifeq ($(MODE), debug)
 	mkdir -p logs/
-	$(ENV_PREFIX) python3 $(COMPILE_SCRIPT) build_ext --inplace > $(LOG_PATH) 2>&1 && \
+	KERNELS=$(KERNELS) $(ENV_PREFIX) python3 $(COMPILE_SCRIPT) build_ext --inplace > $(LOG_PATH) 2>&1 && \
 	$(ENV_PREFIX) $(BENCH_CMD) >> $(LOG_PATH) 2>&1
 else
 	mkdir -p logs/

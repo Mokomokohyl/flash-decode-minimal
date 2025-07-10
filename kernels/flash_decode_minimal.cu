@@ -136,7 +136,6 @@ struct state_t {
     }
 };
 
-__host__ __device__
 struct TensorStrides {
     long b, h, n, d; // batch, head, sequence, dimension
 };
@@ -539,12 +538,21 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     c10::Half* mask_ptr = has_mask ? mask.data_ptr<c10::Half>() : nullptr;
 
 #ifdef DEBUG
+    auto kernel = decode_kernel<vec_size, tile_size_per_bdx, num_stages_smem>;
+    int dev_id = 0, num_blocks_per_sm = 0, num_sm = 0, max_grid_size = 0;
+    int num_threads = 128;
+    cudaGetDevice(&dev_id);
+    cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
+                                                                       num_threads, sram_size);
+    max_grid_size = num_sm * num_blocks_per_sm;
+    printf("Max grid size: %d\n", max_grid_size);
     if (has_mask) {
         printf("with mask\n");
     } else {
         printf("no mask\n");
     }
-    printf("B: %d, nh: %d, NQ: %d, d: %d, NKV: %d", B, nh, NQ, d, NKV);
+    printf("B: %d, nh: %d, NQ: %d, d: %d, NKV: %d\n", B, nh, NQ, d, NKV);
     printf("Default sram size: %d\n", max_sram_size);
     printf("Bc: %d, Br: %d, NQ: %d, NKV: %d, Tr: %d, Tc: %d\n", Bc, Br, NQ, NKV, Tr, Tc);
     printf("Required Sram size: %d\n", sram_size);
