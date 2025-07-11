@@ -350,7 +350,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
                 Kj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size, 
                 K + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
-                cur_kv_token < kv_chunk_size
+                (cur_kv_token < kv_chunk_size) && (cur_kv_token + kv_chunk_idx * kv_chunk_size < NKV)
             );
         }
         cp_async_commit_group();
@@ -359,7 +359,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             cp_async_pred_load_128b<true>(
                 Vj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size,
                 V + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
-                cur_kv_token < kv_chunk_size
+                (cur_kv_token < kv_chunk_size) && (cur_kv_token + kv_chunk_idx * kv_chunk_size < NKV)
             );
         }
         cp_async_commit_group();
@@ -407,7 +407,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             cp_async_pred_load_128b<true>( /* fill zero for k, v */
                 Kj + stage_idx * Bc * d + (ty * tile_size_per_bdx + j) * d + tx * vec_size,
                 K + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
-                cur_kv_token < kv_chunk_size
+                (cur_kv_token < kv_chunk_size) && (cur_kv_token + kv_chunk_idx * kv_chunk_size < NKV)
             );
         }
         cp_async_commit_group();
@@ -416,7 +416,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
         float row_l = 0.0f; // row_l = rowsum(P)
 #pragma unroll
         for (int y = 0; y < tile_size_per_bdx; y++) {
-            if ((consumer_kv_idx + ty * tile_size_per_bdx + y) < kv_chunk_size) {
+            if ((consumer_kv_idx + ty * tile_size_per_bdx + y) < kv_chunk_size && ((consumer_kv_idx + ty * tile_size_per_bdx + y + kv_chunk_idx * kv_chunk_size) < NKV)) {
                 S[ty * tile_size_per_bdx + y] = ptx_exp2(S[ty * tile_size_per_bdx + y] - st.m);
                 row_l += S[ty * tile_size_per_bdx + y];
             }
@@ -453,7 +453,7 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
             cp_async_pred_load_128b<true>(
                 Vj + stage_idx * Bc * d + (ty * tile_size_per_bdx + y) * d + tx * vec_size,
                 V + kv_offset + cur_kv_token * kv_stride.n + tx * vec_size,
-                cur_kv_token < kv_chunk_size
+                (cur_kv_token < kv_chunk_size) && (cur_kv_token + kv_chunk_idx * kv_chunk_size < NKV)
             );
         }
         cp_async_commit_group();
