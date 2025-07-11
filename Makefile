@@ -1,7 +1,7 @@
 LLAMA_CHAT_MODEL_PATH ?= /path/to/model # revise to run chat completion and bench
 MAX_SEQ_LEN = 1024
 
-VERSION ?= v2
+VERSION ?= ref
 MODE ?= bench
 
 LOG_FILE_NAME ?= $(MODE)_$(VERSION)
