@@ -109,7 +109,7 @@ struct state_t {
 
     // init st values
     __device__ __forceinline__ void init() {
-        l = 1.0f;
+        l = 0.0f;
         m = -INFINITY;
 #pragma unroll
         for (int i = 0; i < vec_size; i++) {
