@@ -64,7 +64,7 @@ The grid dim are always (B, nh) for the following kernels.
 
 - `v1`:
     + Add ptx_exp2 to accelerate exp.
-    + Replace tx with ty and set blockDim.x to 32. With `shfl_xor_sync` to perform in-warp reduction, we can gain parralellism in head_dim dimension. Each (ty, tx) loads 4 dimensions in the 128 dimensions of a token of Q/K/V. A token is assigned to (ty, :). In decode stage, there is still only one warp doing all the calculation of O.
+    + Replace tx with ty and set blockDim.x to 32. With `shfl_xor_sync` to perform in-warp reduction, we can gain parrallelism in head_dim dimension. Each (ty, tx) loads 4 dimensions in the 128 dimensions of a token of Q/K/V. A token is assigned to (ty, :). In decode stage, there is still only one warp doing all the calculation of O.
 
 - `minimal-v2`
     bdx = 16. (ty, tx) loads 8 dims in 128 dims of a token of Q/K/V. For each (ty, tx), load Q once and iterate over K/V. The rearrange of loops for parallelizing P*V is interesting.
@@ -74,12 +74,6 @@ The grid dim are always (B, nh) for the following kernels.
     - Vectorized load/store between HBM/Shared Memory and registers.
 
 - `fdm`
-    - seq_len -> bdy * tile_size_per_bdx(ty) -> tile_size_per_bdx(tx). For each ty, assign 8 tokens; for each tx, assign 8 dims. The window moves 64 tokens right along seq_len + cache_len for each iteration. After reaching the end, we merge the states of ty = 1,...,bdy-1 thread groups.
+    - seq_len -> bdy * tile_size_per_bdx(ty) -> tile_size_per_bdx(tx). For each ty, assign 8 tokens; for each tx, assign 8 dims. The window moves 64 tokens right along seq_len + cache_len(NKV) for each iteration. After reaching the end, we merge the states of ty = 1,...,bdy-1 thread groups.
     - The calculation in seq_len dimension is then parallelzed. We do not have to iterate over K/V from left to right. Merge the KV clips in the right way and we get right outputs.
 
-
-### TODOs
-
-- [ ] Replace KV cache with Paged KV cache
-- [ ] Support GQA (Grouped-Query Attention)
-- [ ] Add better profiling methods
