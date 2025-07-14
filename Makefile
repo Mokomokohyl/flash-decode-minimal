@@ -70,6 +70,9 @@ clean:
 clean_logs:
 	@rm -rf logs/
 
+bench-kernels:
+	python3 bench_kernels.py > bench_kernels.log 2>&1
+
 bench-v1: ; $(MAKE) bench VERSION=v1
 bench-v2: ; $(MAKE) bench VERSION=v2
 bench-minimal: ; $(MAKE) bench VERSION=minimal
