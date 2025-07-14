@@ -16,7 +16,7 @@ from llama.kernels import fdm_splitkv
 batch_size = 6
 n_head = 32
 seq_len = 1
-cache_len = 2048
+cache_len = 16384
 head_embd = 128 # fixed for the custom kernels
 
 def manual_attn(q, k, v, mask=None):

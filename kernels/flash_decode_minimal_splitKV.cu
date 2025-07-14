@@ -504,16 +504,16 @@ void decode_kernel(const c10::Half* Q, const c10::Half* K, const c10::Half* V, c
 }
 
 template <size_t vec_size>
-__global__ void MergeStates(const uint32_t num_kv_chunks, const int d, const float* tmp_O, const float* tmp_states_lm, c10::Half* O) {
+__global__ void MergeStates(const uint32_t num_kv_chunks, const uint32_t nh, const int d, const float* tmp_O, const float* tmp_states_lm, c10::Half* O) {
     int batch_idx = blockIdx.x;
-    int by = blockIdx.y;
+    int ty = threadIdx.y; //head_idx
     int tx = threadIdx.x;
 
     float cur_l, cur_m;
     float_vec_t<vec_size> cur_o_vec;
     state_t<vec_size> st;
-    int tmp_states_lm_idx_base = (batch_idx * gridDim.y + by) * num_kv_chunks * 2;
-    int tmp_O_idx_base = (batch_idx * gridDim.y + by) * num_kv_chunks * d + tx * vec_size;
+    int tmp_states_lm_idx_base = (batch_idx * nh + ty) * num_kv_chunks * 2;
+    int tmp_O_idx_base = (batch_idx * nh + ty) * num_kv_chunks * d + tx * vec_size;
     st.l = tmp_states_lm[tmp_states_lm_idx_base];
     st.m = tmp_states_lm[tmp_states_lm_idx_base + 1];
     st.o_vec.load_from_float8(tmp_O + tmp_O_idx_base);
@@ -526,7 +526,7 @@ __global__ void MergeStates(const uint32_t num_kv_chunks, const int d, const flo
         }
     }
     st.normalize();
-    st.o_vec.store_to_half(O + ((batch_idx * gridDim.y * d) + (by * d)) + tx * vec_size);
+    st.o_vec.store_to_half(O + ((batch_idx * nh * d) + (ty * d)) + tx * vec_size);
 }
 
 torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor mask) {
@@ -656,9 +656,9 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
                 NQ, NKV, d, Tc, Bc, softmax_scale, kv_chunk_size, num_kv_chunks,
                 O.data_ptr<c10::Half>(), bdx, bdy, q_stride, kv_stride, tmp_O.data_ptr<float>(), tmp_states_lm.data_ptr<float>()
             );
-            dim3 merge_grid_dim(B, nh);
-            dim3 merge_block_dim(bdx);
-            MergeStates<vec_size><<<merge_grid_dim, merge_block_dim>>>(num_kv_chunks, d, tmp_O.data_ptr<float>(), tmp_states_lm.data_ptr<float>(), O.data_ptr<c10::Half>());
+            dim3 merge_grid_dim(B);
+            dim3 merge_block_dim(bdx, nh);
+            MergeStates<vec_size><<<merge_grid_dim, merge_block_dim>>>(num_kv_chunks, nh, d, tmp_O.data_ptr<float>(), tmp_states_lm.data_ptr<float>(), O.data_ptr<c10::Half>());
         }
     }
     return O;
