@@ -45,11 +45,17 @@ def rotate_half(x):
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
+def rotate_every_two(x):
+    # 相邻两维成对旋转，匹配 view_as_complex(..., 2) 的语义
+    x_even = x[..., ::2]
+    x_odd  = x[..., 1::2]
+    return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
+
 def apply_rotary_pos_emb(q, k, cos, sin):
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = (q * cos) + (rotate_every_two(q) * sin)
+    k_embed = (k * cos) + (rotate_every_two(k) * sin)
     return q_embed.to(q.dtype), k_embed.to(k.dtype)
 
 class RMSNorm(torch.nn.Module):
@@ -345,18 +351,38 @@ class Attention(nn.Module):
             rms_attn_weight = torch.zeros(self.head_dim, device=x.device)
             gate_up_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
             down_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
-            freqs = freqs_cis[-1]  # shape: (head_dim,), dtype: complex64
-            cos = freqs.real.unsqueeze(0)  # shape: (1, head_dim)
-            sin = freqs.imag.unsqueeze(0)  # shape: (1, head_dim)
+            freqs = freqs_cis[0]  # shape: (head_dim,), dtype: complex64
+            cos = freqs.real  # shape: (1, head_dim)
+            sin = freqs.imag  # shape: (1, head_dim)
+            cos_full = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (seqlen, head_dim)
+            sin_full = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (seqlen, head_dim)
+            
+            # print(f"input_tensor.shape: {input_tensor.shape}")
+            # print(f"weight_qkv.shape: {self.weight_qkv.shape}")
+            # print(f"weight_o.shape: {self.weight_o.shape}")
+            # print(f"kv_cache_k.shape: {kv_cache_k.shape}")
+            # print(f"kv_cache_v.shape: {kv_cache_v.shape}")
+            # print(f"rms_input_weight.shape: {rms_input_weight.shape}")
+            # print(f"cos_full.shape: {cos_full.shape}")
+            # print(f"sin_cull.shape: {sin_full.shape}")
+            # exit()
 
-            # TODO: call llama_decoder_layer
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
+            
             xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            # Compare RoPE
             xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+            my_xq, my_xk = apply_rotary_pos_emb(xq, xk, cos_full, sin_full)
+            print("--- Result from apply_rotary_pos_emb (Corrected) ---")
+            print(my_xq.shape, my_xq)
+            # --- 标准的 apply_rotary_emb 作为对比 ---
+            xq_ref, xk_ref = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+            print("\n--- Result from apply_rotary_emb (Reference) ---")
+            print(xq_ref.shape, xq_ref)
+            print(f"\n--- Comparison ---")
+            print(f"Are results close? {torch.allclose(my_xq, xq_ref, atol=1e-6)}")
+            exit()
 
             # Update KV cache
             xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
@@ -374,8 +400,8 @@ class Attention(nn.Module):
                 down_proj_weight_fuse,      
                 rms_input_weight,      
                 rms_attn_weight,       
-                cos,                   
-                sin                    
+                cos_full,                   
+                sin_full               
             )
         else:
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
