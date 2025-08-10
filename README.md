@@ -6,7 +6,7 @@ Currently the kernels only support llama-2-7b-chat(head_dim=128, MHA) model infe
 - CUDA 12.6
 - Create a new conda virtual env, run 
 ```bash
-pip install -e .
+pip install -r requirements.txt
 ```
 ## Build and run
 Update the `LLAMA_CHAT_MODEL_PATH` to your Llama-2-7B-chat model path in `Makefile` or pass it as a command-line argument (e.g. `make bench LLAMA_MODEL_PATH=/path/to/model`).  
