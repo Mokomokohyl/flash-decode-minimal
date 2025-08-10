@@ -371,19 +371,19 @@ class Attention(nn.Module):
             
             xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
             # Compare RoPE
-            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            my_xq, my_xk = apply_rotary_pos_emb(xq, xk, cos_full, sin_full)
-            print("--- Result from apply_rotary_pos_emb (Corrected) ---")
-            print(my_xq.shape, my_xq)
-            # --- 标准的 apply_rotary_emb 作为对比 ---
-            xq_ref, xk_ref = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-            print("\n--- Result from apply_rotary_emb (Reference) ---")
-            print(xq_ref.shape, xq_ref)
-            print(f"\n--- Comparison ---")
-            print(f"Are results close? {torch.allclose(my_xq, xq_ref, atol=1e-6)}")
-            exit()
-
+            # xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            # xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            # my_xq, my_xk = apply_rotary_pos_emb(xq, xk, cos_full, sin_full)
+            # print("--- Result from apply_rotary_pos_emb (Corrected) ---")
+            # print(my_xq.shape, my_xq)
+            # # --- 标准的 apply_rotary_emb 作为对比 ---
+            # xq_ref, xk_ref = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+            # print("\n--- Result from apply_rotary_emb (Reference) ---")
+            # print(xq_ref.shape, xq_ref)
+            # print(f"\n--- Comparison ---")
+            # print(f"Are results close? {torch.allclose(my_xq, xq_ref, atol=1e-6)}")
+            # exit()
+# 
             # Update KV cache
             xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
