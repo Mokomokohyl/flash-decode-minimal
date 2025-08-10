@@ -39,6 +39,18 @@ class ModelArgs:
     max_batch_size: int = 32
     max_seq_len: int = 2048
 
+# import from llama.py
+def rotate_half(x):
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed.to(q.dtype), k_embed.to(k.dtype)
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -181,7 +193,6 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
-
 class Attention(nn.Module):
     """Multi-head attention module."""
     def __init__(self, args: ModelArgs):
@@ -266,6 +277,8 @@ class Attention(nn.Module):
             scores = F.softmax(scores.float(), dim=-1).type_as(q)
             return torch.matmul(scores, v)
 
+        self.use_cluster_fusion = os.getenv("USE_CLUSTER_FUSION", 'false').lower() == 'true'
+
         # Kernel choice
         kernel_map = {
             "USE_FLASH_DECODE_MINIMAL": (fdm.forward, "flash-decode-minimal"),
@@ -294,12 +307,22 @@ class Attention(nn.Module):
         self.total_duration_ms = 0.0
         self.wordy = False # set to true will make it output time for every attention call, slowing down overall generation.
 
+        # Cluster Fusion params
+        self.weight_qkv = torch.cat([
+            self.wq.weight.data,  # (hidden_size, n_heads * head_dim)
+            self.wk.weight.data,  # (hidden_size, n_kv_heads * head_dim)
+            self.wv.weight.data   # (hidden_size, n_kv_heads * head_dim)
+        ], dim=0)  # (3 * hidden_size, n_heads * head_dim)
+        self.weight_o = self.wo.weight.data  # (n_heads * head_dim, hidden_size)
+
     def forward(
         self,
+        unnormed_x: torch.Tensor,
         x: torch.Tensor,
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
+        rms_input_weight: torch.Tensor,  # 新增参数
     ):
         """
         Forward pass of the attention module.
@@ -315,72 +338,113 @@ class Attention(nn.Module):
 
         """
         bsz, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        if self.use_cluster_fusion and mask is None:
+            input_tensor = unnormed_x if unnormed_x.dim() == 2 else unnormed_x.view(-1, unnormed_x.size(-1))  # (1, hidden_size)
+            kv_cache_k = self.cache_k[:bsz, :start_pos + seqlen].reshape(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_v = self.cache_v[:bsz, :start_pos + seqlen].reshape(-1, self.n_local_kv_heads * self.head_dim)
+            rms_attn_weight = torch.zeros(self.head_dim, device=x.device)
+            gate_up_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
+            down_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
+            freqs = freqs_cis[-1]  # shape: (head_dim,), dtype: complex64
+            cos = freqs.real.unsqueeze(0)  # shape: (1, head_dim)
+            sin = freqs.imag.unsqueeze(0)  # shape: (1, head_dim)
 
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            # TODO: call llama_decoder_layer
+            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+            xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+            # Update KV cache
+            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-        # xq, xk, xv are contiguous in memory
+            return llama_decoder_layer(
+                input_tensor,          
+                self.weight_qkv,                          
+                self.weight_o,              
+                kv_cache_k,
+                kv_cache_v,           
+                gate_up_proj_weight_fuse,      
+                down_proj_weight_fuse,      
+                rms_input_weight,      
+                rms_attn_weight,       
+                cos,                   
+                sin                    
+            )
+        else:
+            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+            xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        # keys, values are not contiguous in memory. xq remains contiguous
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+            self.cache_k = self.cache_k.to(xq)
+            self.cache_v = self.cache_v.to(xq)
 
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-        self.start_event.record()
-        if self.method_name != "Original" and mask is None:
-            mask = torch.empty(0, dtype=torch.float16, device=xq.device)
-        output = self.attention_kernel(xq, keys, values, mask)
-        self.end_event.record()
-        torch.cuda.synchronize()
-        
-        duration_ms = self.start_event.elapsed_time(self.end_event)
-        self.total_duration_ms += duration_ms
+            # xq, xk, xv are contiguous in memory
 
-        if self.wordy:
-            print(f"[{self.method_name}] Attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
+            keys = self.cache_k[:bsz, : start_pos + seqlen]
+            values = self.cache_v[:bsz, : start_pos + seqlen]
 
-        self.total_tokens_processed += xq.size(0) * xq.size(2) # bsz * seqlen
-        if xq.size(2) > 1: # Prefill
-            self.prefill_duration_ms += duration_ms
-            self.prefill_call_count += 1
-        else: # Decode
-            self.decode_duration_ms += duration_ms
-            self.decode_call_count += 1
+            # keys, values are not contiguous in memory. xq remains contiguous
 
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        return self.wo(output)
+            # repeat k/v heads if n_kv_heads < n_heads
+            keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+            values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+
+            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            keys = keys.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
+            values = values.transpose(1, 2) # (bs, n_local_heads, cache_len + seqlen, head_dim)
+
+            self.start_event.record()
+            if self.method_name != "Original" and mask is None:
+                mask = torch.empty(0, dtype=torch.float16, device=xq.device)
+            output = self.attention_kernel(xq, keys, values, mask)
+            self.end_event.record()
+            torch.cuda.synchronize()
+            
+            duration_ms = self.start_event.elapsed_time(self.end_event)
+            self.total_duration_ms += duration_ms
+
+            if self.wordy:
+                print(f"[{self.method_name}] attention - seqlen: {xq.size(2)}, cache_len: {keys.size(2)-xq.size(2)}, time: {duration_ms:.3f}ms")
+
+            self.total_tokens_processed += xq.size(0) * xq.size(2) # bsz * seqlen
+            if xq.size(2) > 1: # prefill
+                self.prefill_duration_ms += duration_ms
+                self.prefill_call_count += 1
+            else: # decode
+                self.decode_duration_ms += duration_ms
+                self.decode_call_count += 1
+
+            output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            return self.wo(output)
 
     # profile summary
     def print_summary(self, layer_id):
-        print(f"--- Layer {layer_id} Attention Summary ({self.method_name}) ---")
+        print(f"--- layer {layer_id} attention summary ({self.method_name}) ---")
         if self.prefill_call_count > 0:
             avg_prefill_time = self.prefill_duration_ms / self.prefill_call_count
-            print(f"  Prefill : {self.prefill_duration_ms:.2f} ms total, {self.prefill_call_count} calls, {avg_prefill_time:.2f} ms/call")
+            print(f"  prefill : {self.prefill_duration_ms:.2f} ms total, {self.prefill_call_count} calls, {avg_prefill_time:.2f} ms/call")
         
         if self.decode_call_count > 0:
             avg_decode_time = self.decode_duration_ms / self.decode_call_count
             avg_decode_token_time = self.decode_duration_ms / self.total_tokens_processed if self.total_tokens_processed > 0 else 0
-            print(f"  Decode  : {self.decode_duration_ms:.2f} ms total, {self.decode_call_count} calls, {avg_decode_time:.2f} ms/call")
-            print(f"  Tokens Processed: {self.total_tokens_processed}, Avg Time/Token: {avg_decode_token_time:.3f} ms")
+            print(f"  decode  : {self.decode_duration_ms:.2f} ms total, {self.decode_call_count} calls, {avg_decode_time:.2f} ms/call")
+            print(f"  tokens processed: {self.total_tokens_processed}, avg time/token: {avg_decode_token_time:.3f} ms")
         print("-" * (30 + len(self.method_name)))
+
 
 
 class FeedForward(nn.Module):
@@ -483,7 +547,7 @@ class TransformerBlock(nn.Module):
 
         """
         h = x + self.attention(
-            self.attention_norm(x), start_pos, freqs_cis, mask
+            x, self.attention_norm(x), start_pos, freqs_cis, mask, self.attention_norm.weight
         )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out

@@ -27,6 +27,8 @@ else ifeq ($(VERSION),fdm)
 else ifeq ($(VERSION),fdm-splitkv)
 	ENV_PREFIX += USE_FDM_SPLIT_KV=true
 	KERNELS=fdm_splitkv
+else ifeq ($(VERSION),clusterfusion)
+	ENV_PREFIX = USE_CLUSTER_FUSION=true
 else ifeq ($(VERSION),ref)
 	ENV_PREFIX = 
 else
@@ -39,6 +41,12 @@ BENCH_CMD = torchrun --nproc_per_node 1 bench.py \
 	--ckpt_dir $(LLAMA_CHAT_MODEL_PATH) \
 	--tokenizer_path ./tokenizer.model \
 	--max_seq_len $(MAX_SEQ_LEN) --max_batch_size 6
+
+clusterfusion:
+	USE_CLUSTER_FUSION=true torchrun --nproc_per_node 1 bench.py \
+	--ckpt_dir $(LLAMA_CHAT_MODEL_PATH) \
+	--tokenizer_path ./tokenizer.model \
+	--max_seq_len $(MAX_SEQ_LEN) --max_batch_size 1 > ./logs/bench_clusterfusion.log 2>&1
 
 run:
 ifeq ($(MODE), debug)
