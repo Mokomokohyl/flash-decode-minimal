@@ -23,6 +23,7 @@ from .kernels import minimal_v2
 from .kernels import v2
 from .kernels import fdm
 from .kernels import fdm_splitkv
+from clusterfusion import llama_decoder_layer
 
 @dataclass
 class ModelArgs:

@@ -1,4 +1,4 @@
-LLAMA_CHAT_MODEL_PATH ?= /path/to/model # revise to run chat completion and bench
+LLAMA_CHAT_MODEL_PATH ?= /mnt/model/llama-2-7b # revise to run chat completion and bench
 MAX_SEQ_LEN = 1024
 
 VERSION ?= ref
