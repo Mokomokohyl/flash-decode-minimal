@@ -346,8 +346,8 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
         if self.use_cluster_fusion and mask is None:
             input_tensor = unnormed_x if unnormed_x.dim() == 2 else unnormed_x.view(-1, unnormed_x.size(-1))  # (1, hidden_size)
-            kv_cache_k = self.cache_k[:bsz, :start_pos + seqlen].reshape(-1, self.n_local_kv_heads * self.head_dim)
-            kv_cache_v = self.cache_v[:bsz, :start_pos + seqlen].reshape(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_k = self.cache_k[:bsz, :start_pos].reshape(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_v = self.cache_v[:bsz, :start_pos].reshape(-1, self.n_local_kv_heads * self.head_dim)
             rms_attn_weight = torch.zeros(self.head_dim, device=x.device)
             gate_up_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
             down_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
@@ -390,7 +390,7 @@ class Attention(nn.Module):
             self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
             self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-            return llama_decoder_layer(
+            output = llama_decoder_layer(
                 input_tensor,          
                 self.weight_qkv,                          
                 self.weight_o,              
@@ -403,6 +403,10 @@ class Attention(nn.Module):
                 cos_full,                   
                 sin_full               
             )
+            # print(output.shape)
+            output = output.contiguous().view(bsz, seqlen, -1)
+            # print(output.shape, output[0, 0, 0:128])
+            return self.wo(output)
         else:
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
@@ -453,8 +457,10 @@ class Attention(nn.Module):
             else: # decode
                 self.decode_duration_ms += duration_ms
                 self.decode_call_count += 1
+            # print(output.shape)
 
             output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            # print(output.shape, output[0, 0, 0:128])
             return self.wo(output)
 
     # profile summary
