@@ -342,7 +342,7 @@ class Attention(nn.Module):
                     if hasattr(self.wo, 'weight') and self.wo.weight is not None:
                         # 需要转置并确保内存连续，与 test_llama.py 中的处理方式一致
                         wo_weight = self.wo.weight.data.T.contiguous()
-                        print(f"wo_weight shape: {wo_weight.shape}, non-zero: {(wo_weight != 0).sum().item()}")
+                        # print(f"wo_weight shape: {wo_weight.shape}, non-zero: {(wo_weight != 0).sum().item()}")
                         
                 return normal_qkv.weight.data, wo_weight
             
