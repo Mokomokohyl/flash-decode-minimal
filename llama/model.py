@@ -362,9 +362,15 @@ class Attention(nn.Module):
         """
         bsz, seqlen, _ = x.shape
         if self.use_cluster_fusion and mask is None:
+            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+            
+            xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
             input_tensor = unnormed_x if unnormed_x.dim() == 2 else unnormed_x.view(-1, unnormed_x.size(-1))  # (1, hidden_size)
-            kv_cache_k = self.cache_k[:bsz, :start_pos].to(input_tensor).transpose(1, 2).contiguous()
-            kv_cache_v = self.cache_v[:bsz, :start_pos].to(input_tensor).transpose(1, 2).contiguous()
+            kv_cache_k = self.cache_k[:bsz, :start_pos].to(xq).transpose(1, 2).contiguous()
+            kv_cache_v = self.cache_v[:bsz, :start_pos].to(xq).transpose(1, 2).contiguous()
             rms_input_weight = rms_input_weight.reshape(1, 4096)
             rms_attn_weight = torch.zeros(self.head_dim, device=x.device)
             gate_up_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
@@ -385,17 +391,12 @@ class Attention(nn.Module):
             print(f"sin_cull.shape: {sin_full.shape}", sin_full.is_contiguous(), sin_full.dtype)
             # exit()
 
-            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-            
-            xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             # Compare RoPE
             # my_xq, my_xk = apply_rotary_pos_emb(xq, xk, cos_full, sin_full)
             # print("--- Result from apply_rotary_pos_emb (Corrected) ---")
             # print(my_xq.shape, my_xq)
             # # --- 标准的 apply_rotary_emb 作为对比 ---
-            xq_ref, xk_ref = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
             # print("\n--- Result from apply_rotary_emb (Reference) ---")
             # print(xq_ref.shape, xq_ref)
             # print(f"\n--- Comparison ---")
@@ -406,7 +407,7 @@ class Attention(nn.Module):
             # xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             self.cache_k = self.cache_k.to(xq)
             self.cache_v = self.cache_v.to(xq)
-            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk_ref
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
             self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
             output = llama_decoder_layer(
