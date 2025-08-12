@@ -376,6 +376,7 @@ class Attention(nn.Module):
         if self.use_cluster_fusion and not self.weights_initialized:
             self.weight_qkv, self.weight_o = self._get_weights_hook(self)
             self.weights_initialized = True
+            torch.cuda.synchronize()
         if self.use_cluster_fusion and mask is None:
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
             
