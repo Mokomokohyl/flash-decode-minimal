@@ -313,13 +313,30 @@ class Attention(nn.Module):
         self.total_duration_ms = 0.0
         self.wordy = False # set to true will make it output time for every attention call, slowing down overall generation.
 
-        # Cluster Fusion params
-        self.weight_qkv = torch.cat([
-            self.wq.weight.data,  # (hidden_size, n_heads * head_dim)
-            self.wk.weight.data,  # (hidden_size, n_kv_heads * head_dim)
-            self.wv.weight.data   # (hidden_size, n_kv_heads * head_dim)
-        ], dim=0)  # (3 * hidden_size, n_heads * head_dim)
-        self.weight_o = self.wo.weight.data  # (n_heads * head_dim, hidden_size)
+        if self.use_cluster_fusion:
+            # print(f"wq.weight.data shape: {self.wq.weight.data.shape}")
+            # print(f"wk.weight.data shape: {self.wk.weight.data.shape}")
+            # print(f"wv.weight.data shape: {self.wv.weight.data.shape}")
+            # wq_symmetric = torch.allclose(self.wq.weight.data, self.wq.weight.data.T, atol=1e-7)
+            # wv_symmetric = torch.allclose(self.wv.weight.data, self.wv.weight.data.T, atol=1e-7)
+            # wk_symmetric = torch.allclose(self.wk.weight.data, self.wk.weight.data.T, atol=1e-7)
+            # print(f"Is wq.weight.data symmetric? {wq_symmetric}")
+            # print(f"Is wk.weight.data symmetric? {wk_symmetric}")
+            # print(f"Is wv.weight.data symmetric? {wv_symmetric}")
+            # print(self.wq.weight.data[1, 0:128])
+            # print(self.wq.weight.data.T[1, 0:128])
+# 
+            # print("self.wq.weight.data.is_contiguous()", self.wq.weight.data.is_contiguous())
+            # print("self.wq.weight.data.T.is_contiguous()", self.wq.weight.data.T.is_contiguous() )
+            # Cluster Fusion params
+            self.weight_qkv = torch.cat([
+                self.wq.weight.data.T.contiguous(), 
+                self.wk.weight.data.T.contiguous(), 
+                self.wv.weight.data.T.contiguous()  
+            ], dim=0)  # row_major (3 * hidden_size, n_head * head_dim)
+            # print(self.weight_qkv.shape, self.weight_qkv.is_contiguous())
+            # print(f"Are results close? {torch.allclose(self.weight_qkv[0:4096, 0:4096], self.wq.weight.data.transpose(0, 1).contiguous(), atol=1e-6)}")
+            self.weight_o = self.wo.weight.data  # (n_heads * head_dim, hidden_size)
 
     def forward(
         self,
@@ -346,8 +363,9 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
         if self.use_cluster_fusion and mask is None:
             input_tensor = unnormed_x if unnormed_x.dim() == 2 else unnormed_x.view(-1, unnormed_x.size(-1))  # (1, hidden_size)
-            kv_cache_k = self.cache_k[:bsz, :start_pos].reshape(-1, self.n_local_kv_heads * self.head_dim)
-            kv_cache_v = self.cache_v[:bsz, :start_pos].reshape(-1, self.n_local_kv_heads * self.head_dim)
+            kv_cache_k = self.cache_k[:bsz, :start_pos].to(input_tensor).transpose(1, 2).contiguous()
+            kv_cache_v = self.cache_v[:bsz, :start_pos].to(input_tensor).transpose(1, 2).contiguous()
+            rms_input_weight = rms_input_weight.reshape(1, 4096)
             rms_attn_weight = torch.zeros(self.head_dim, device=x.device)
             gate_up_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
             down_proj_weight_fuse = torch.zeros(self.head_dim, device=x.device)
@@ -357,27 +375,27 @@ class Attention(nn.Module):
             cos_full = torch.repeat_interleave(freqs_cis.real, 2, dim=-1)  # (seqlen, head_dim)
             sin_full = torch.repeat_interleave(freqs_cis.imag, 2, dim=-1)  # (seqlen, head_dim)
             
-            # print(f"input_tensor.shape: {input_tensor.shape}")
-            # print(f"weight_qkv.shape: {self.weight_qkv.shape}")
-            # print(f"weight_o.shape: {self.weight_o.shape}")
-            # print(f"kv_cache_k.shape: {kv_cache_k.shape}")
-            # print(f"kv_cache_v.shape: {kv_cache_v.shape}")
-            # print(f"rms_input_weight.shape: {rms_input_weight.shape}")
-            # print(f"cos_full.shape: {cos_full.shape}")
-            # print(f"sin_cull.shape: {sin_full.shape}")
+            print(f"input_tensor.shape: {input_tensor.shape}", input_tensor.is_contiguous(), input_tensor.dtype)
+            print(f"weight_qkv.shape: {self.weight_qkv.shape}", self.weight_qkv.is_contiguous(), self.weight_qkv.dtype)
+            print(f"weight_o.shape: {self.weight_o.shape}", self.weight_o.is_contiguous(), self.weight_o.dtype)
+            print(f"kv_cache_k.shape: {kv_cache_k.shape}", kv_cache_k.is_contiguous(), kv_cache_k.dtype)
+            print(f"kv_cache_v.shape: {kv_cache_v.shape}", kv_cache_v.is_contiguous(), kv_cache_v.dtype)
+            print(f"rms_input_weight.shape: {rms_input_weight.shape}", rms_input_weight.is_contiguous(), rms_input_weight.dtype)
+            print(f"cos_full.shape: {cos_full.shape}", cos_full.is_contiguous(), cos_full.dtype)
+            print(f"sin_cull.shape: {sin_full.shape}", sin_full.is_contiguous(), sin_full.dtype)
             # exit()
 
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
             
             xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             # Compare RoPE
-            # xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            # xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
             # my_xq, my_xk = apply_rotary_pos_emb(xq, xk, cos_full, sin_full)
             # print("--- Result from apply_rotary_pos_emb (Corrected) ---")
             # print(my_xq.shape, my_xq)
             # # --- 标准的 apply_rotary_emb 作为对比 ---
-            # xq_ref, xk_ref = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+            xq_ref, xk_ref = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
             # print("\n--- Result from apply_rotary_emb (Reference) ---")
             # print(xq_ref.shape, xq_ref)
             # print(f"\n--- Comparison ---")
@@ -385,9 +403,10 @@ class Attention(nn.Module):
             # exit()
 # 
             # Update KV cache
-            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            # xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            self.cache_k = self.cache_k.to(xq)
+            self.cache_v = self.cache_v.to(xq)
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk_ref
             self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
             output = llama_decoder_layer(
@@ -403,9 +422,10 @@ class Attention(nn.Module):
                 cos_full,                   
                 sin_full               
             )
-            # print(output.shape)
+            print(output.shape)
             output = output.contiguous().view(bsz, seqlen, -1)
-            # print(output.shape, output[0, 0, 0:128])
+            print(output.shape, output[0, 0, 0:128])
+            exit()
             return self.wo(output)
         else:
             xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -460,7 +480,7 @@ class Attention(nn.Module):
             # print(output.shape)
 
             output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-            # print(output.shape, output[0, 0, 0:128])
+            print(output.shape, output[0, 0, 0:128])
             return self.wo(output)
 
     # profile summary
@@ -608,6 +628,10 @@ class Transformer(nn.Module):
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
+
+        self.use_cluster_fusion = os.getenv("USE_CLUSTER_FUSION", 'false').lower() == 'true'
+        if self.use_cluster_fusion == True:
+            print("Using clusterfusion kernel")
 
         self.tok_embeddings = ParallelEmbedding(
             params.vocab_size, params.dim, init_method=lambda x: x
